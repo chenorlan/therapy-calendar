@@ -74,7 +74,7 @@ nav.tabs button.on { color: var(--brand-d); font-weight: 700; background: var(--
   font-weight: 700; line-height: 16px; white-space: nowrap; }
 .tag svg { width: 10px; height: 10px; }
 .tag.ok { background: var(--ok); color: #fff; } .tag.no { background: var(--no); color: #fff; }
-.tag.pay { background: var(--pay); color: var(--pay-t); } .tag.unpaid { background: #fff; color: var(--no); border: 1px solid var(--no); }
+.tag.pay { background: var(--pay); color: var(--pay-t); } .tag.doc { background: #5F6368; color: #fff; } .tag.unpaid { background: #fff; color: var(--no); border: 1px solid var(--no); }
 .tags { display: flex; gap: 3px; flex-wrap: wrap; }
 .tags.short .tag { padding: 1px 4px; }
 
@@ -204,6 +204,11 @@ select, input[type=text], input[type=date], input[type=time], textarea {
     <div class="row1">
       <h1>יומן הטיפולים</h1>
       <div class="sp"></div>
+      <button id="aiBtn" class="icon" aria-label="שאלה ל-AI" title="שאלה ל-AI על הטיפולים" style="font-size:13px;font-weight:700">AI</button>
+      <button id="receiptBtn" class="icon" aria-label="תשלום מצילום" title="עדכון תשלום מצילום">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      </button>
+      <input type="file" id="receiptFile" accept="image/*" hidden>
       <button id="refreshBtn" class="icon" aria-label="רענון" title="רענון">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>
       </button>
