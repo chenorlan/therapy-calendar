@@ -1,5 +1,5 @@
 // שומר את קבצי האפליקציה כדי שתיפתח מהר. הנתונים עצמם תמיד נטענים מ-Google.
-const CACHE = 'therapy-calendar-v6';
+const CACHE = 'therapy-calendar-v7';
 const FILES = ['./', 'index.html', 'app.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', e => {

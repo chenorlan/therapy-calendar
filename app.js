@@ -1082,9 +1082,9 @@ function showDetails(ev) {
     ${t.allDay ? '' : `<div class="k">מחיר</div><div>${evPrice(ev) ? fmtMoney(evPrice(ev)) + (toAmount(props(ev).price) ? '' : ' <span class="note">(ברירת מחדל)</span>') : '<span class="note">לא נקבע (אפשר לקבוע ב„עריכה” או ב-☰ ← מחירי טיפול)</span>'}</div>`}</div>`;
   if (!t.allDay) {
     h += `<div class="sec">הפגישה</div><div class="seg">
-        <button class="btn ${a === '' ? 'on' : ''}" data-att="" ${dis}>טרם סומן</button>
         <button class="btn ${a === 'yes' ? 'on' : ''}" data-att="yes" ${dis}>✓ התקיימה</button>
         <button class="btn ${a === 'no' ? 'on' : ''}" data-att="no" ${dis}>✗ לא התקיימה</button></div>
+      ${a === '' ? '<p class="note" style="margin-top:-6px">טרם סומן · לחיצה חוזרת על סימון מבטלת אותו</p>' : ''}
       ${a === 'no' && cancelLabel(ev) ? `<p class="note" style="margin-top:-4px">סיבה: ${esc(cancelLabel(ev))}</p>` : ''}
       <div class="sec">תשלום</div><div class="seg">
         <button class="btn ${!paid(ev) ? 'on' : ''}" id="unpaidBtn" ${dis}>לא שולמה</button>
@@ -1104,8 +1104,10 @@ function showDetails(ev) {
     <div class="actions"><button class="btn" id="closeBtn">סגירה</button></div>`;
   const sh = openSheet(h);
   sh.querySelectorAll('[data-att]').forEach(b => b.onclick = async () => {
-    if (b.dataset.att === 'no') { showCancel(ev); return; }
-    const changes = { attended: b.dataset.att, cancel_reason: '', cancel_note: '' };
+    // לחיצה על הסימון הנוכחי מבטלת אותו (= טרם סומן)
+    const target = attended(ev) === b.dataset.att ? '' : b.dataset.att;
+    if (target === 'no') { showCancel(ev); return; }
+    const changes = { attended: target, cancel_reason: '', cancel_note: '' };
     const g = await guardSequence(ev, { props: { ...props(ev), ...changes } });
     if (g.ok) { setStatus(ev, changes); applyPin(g.pin); }
     showDetails(ev);
