@@ -13,7 +13,39 @@ const RCPT_KEYS = ['rcpt_issued', 'rcpt_no', 'rcpt_date'];
 const APP_KEYS = ['attended', ...PAY_KEYS, ...CANCEL_KEYS, ...RCPT_KEYS, 'price', 'session_no'];  // זהה ל-Windows
 const CANCEL_REASONS = [['client', 'ביטול של המטופל/ת'], ['sick', 'מחלה'], ['me', 'ביטול שלי'], ['holiday', 'חג / חופשה'], ['noshow', 'לא הגיע/ה בלי הודעה'], ['other', 'אחר']];
 const APP_FOLDER = 'יומן הטיפולים', BACKUPS_FOLDER = 'גיבויים', SETTINGS_FILE = 'הגדרות.json', BACKUP_KEEP = 30;
-const DEFAULT_SETTINGS = { version: 1, default_price: 0, clients: {}, backup_email: true };
+const DEFAULT_SETTINGS = { version: 1, default_price: 0, clients: {}, backup_email: true, holidays: true };
+// ---- חגי ישראל (לוח ישראלי, שמות בעברית) מ-hebcal.com – זהה ל-Windows
+const HOL = {};  // 'YYYY-MM-DD' → [[שם, 'yomtov'|'other']]
+const HOL_BG = { yomtov: '#FFF1D6', other: '#EEF2FF' }, HOL_FG = { yomtov: '#7A4B00', other: '#3B4A86' };
+const holidaysOn = d => S.settings.holidays !== false ? (HOL[isoDate(d)] || []) : [];
+const holidayKind = d => { const h = holidaysOn(d); return h.length ? (h.some(x => x[1] === 'yomtov') ? 'yomtov' : 'other') : null; };
+const holidayLabel = d => holidaysOn(d).map(x => x[0]).join(' · ');
+const holLoading = new Set();
+function addHolidays(year, items) {
+  for (const k of Object.keys(HOL)) if (k.startsWith(year + '-')) delete HOL[k];
+  for (const h of items) (HOL[h.date] = HOL[h.date] || []).push([h.name, h.kind]);
+}
+async function fetchHolidays(year) {
+  if (DEMO) return [{ date: `${year}-12-04`, name: 'ערב חנוכה', kind: 'other' }, { date: `${year}-12-05`, name: 'חנוכה: א׳ נר', kind: 'other' }, { date: `${year}-11-17`, name: 'יום טוב לדוגמה', kind: 'yomtov' }];
+  const q = new URLSearchParams({ v: '1', cfg: 'json', maj: 'on', min: 'on', mod: 'on', mf: 'on', ss: 'off', nx: 'off', s: 'off', c: 'off', i: 'on', lg: 'he', start: `${year}-01-01`, end: `${year}-12-31` });
+  const r = await fetch('https://www.hebcal.com/hebcal?' + q); if (!r.ok) throw new Error('hebcal ' + r.status);
+  return ((await r.json()).items || []).filter(it => it.category === 'holiday' && it.date)
+    .map(it => ({ date: it.date.slice(0, 10), name: it.hebrew || it.title || '', kind: it.yomtov ? 'yomtov' : 'other' }));
+}
+function ensureHolidays(days) {
+  if (S.settings.holidays === false || !days.length) return;
+  const cache = store.get('holidays', {});
+  for (const y of new Set([days[0].getFullYear(), days[days.length - 1].getFullYear(), new Date().getFullYear()])) {
+    const c = cache[y];
+    if (c && !Object.keys(HOL).some(k => k.startsWith(y + '-'))) addHolidays(y, c.items);
+    if ((c && Date.now() - c.ts < 30 * 864e5) || holLoading.has(y)) continue;
+    holLoading.add(y);
+    fetchHolidays(y).then(items => {
+      const all = store.get('holidays', {}); all[y] = { ts: Date.now(), items }; store.set('holidays', all);
+      addHolidays(y, items); renderView.keepScroll = true; renderView();
+    }).catch(() => {}).finally(() => holLoading.delete(y));
+  }
+}
 const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash'];
 const API = 'https://www.googleapis.com/calendar/v3';
 const DEFAULT_TZ = 'Asia/Jerusalem';
@@ -802,6 +834,7 @@ function updatePeriod() {
 }
 
 function renderView() {
+  try { const [a, b] = visibleRange(); ensureHolidays([a, addDays(b, -1)]); } catch { /* ignore */ }
   updatePeriod();
   $('#fab').hidden = S.view === 'summary';
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === S.view));
@@ -848,7 +881,7 @@ function timeGridHtml(days) {
   const cols = `44px repeat(${days.length}, 1fr)`;
   const td = today();
   let head = `<div class="tg-head" style="grid-template-columns:${cols}"><div></div>`;
-  days.forEach(d => { head += `<div class="${sameDay(d, td) ? 'today' : ''}" data-day="${isoDate(d)}">${week ? DAYS_S[d.getDay()] : DAYS[d.getDay()]}<span class="num">${d.getDate()}</span></div>`; });
+  days.forEach(d => { const hk = holidayKind(d); head += `<div class="${sameDay(d, td) ? 'today' : ''}" data-day="${isoDate(d)}" ${hk ? `style="background:${HOL_BG[hk]}"` : ''}>${week ? DAYS_S[d.getDay()] : DAYS[d.getDay()]}<span class="num">${d.getDate()}</span>${hk ? `<span class="hol" style="color:${HOL_FG[hk]}">${esc(holidayLabel(d))}</span>` : ''}</div>`; });
   head += '</div>';
   const allday = days.map(d => S.events.filter(ev => { const t = evTimes(ev); return t.allDay && t.s <= d && d < (t.e > t.s ? t.e : addDays(t.s, 1)); }));
   let ad = '';
@@ -878,7 +911,8 @@ function timeGridHtml(days) {
         <b>${esc(title(ev))}</b><div class="t">${hm(t.s)}${week ? '' : '–' + hm(t.e)}${sessionNo(ev) ? (week ? ` · ${sessionNo(ev)}` : `</div><div class="t" style="direction:rtl">מפגש ${sessionNo(ev)}`) : ''}</div>${showTags ? tagsHtml(ev, week) : ''}</div>`;
     }
     if (sameDay(d, now) && now.getHours() >= sh && now.getHours() < eh) inner += `<div class="nowline" style="top:${(mins(now) - sh * 60) * H / 60 + 5}px"></div>`;
-    colsHtml += `<div class="tg-col${sameDay(d, td) ? ' today' : ''}" data-col="${isoDate(d)}" data-sh="${sh}" data-h="${H}" style="height:${height}px">${inner}</div>`;
+    const hk = holidayKind(d);
+    colsHtml += `<div class="tg-col${sameDay(d, td) ? ' today' : ''}" data-col="${isoDate(d)}" data-sh="${sh}" data-h="${H}" style="height:${height}px${hk ? ';background:' + HOL_BG[hk] : ''}">${inner}</div>`;
   });
   return `<div class="${week ? 'week' : 'day'}">${head}${ad}<div class="tg-body" style="grid-template-columns:${cols}">${axis}${colsHtml}</div></div>`;
 }
@@ -890,7 +924,8 @@ function monthHtml() {
   for (const d of days) {
     const evs = S.events.filter(ev => { const t = evTimes(ev); return t.allDay ? (t.s <= d && d < (t.e > t.s ? t.e : addDays(t.s, 1))) : sameDay(t.s, d); });
     const shown = evs.length > 4 ? evs.slice(0, 3) : evs;
-    h += `<div class="mo-cell${d.getMonth() !== m ? ' out' : ''}${sameDay(d, td) ? ' today' : ''}" data-day="${isoDate(d)}"><div class="d"><span>${d.getDate()}</span></div>`;
+    const hk = holidayKind(d);
+    h += `<div class="mo-cell${d.getMonth() !== m ? ' out' : ''}${sameDay(d, td) ? ' today' : ''}" data-day="${isoDate(d)}" ${hk ? `style="background:${HOL_BG[hk]}"` : ''}><div class="d"><span>${d.getDate()}</span></div>${hk ? `<div class="hol" style="color:${HOL_FG[hk]}">${esc(holidayLabel(d))}</div>` : ''}`;
     for (const ev of shown) {
       const a = attended(ev);
       let ic = '';
@@ -914,7 +949,7 @@ function listHtml() {
     const d = addDays(ws, i);
     const evs = S.events.filter(ev => sameDay(evTimes(ev).s, d));
     if (!evs.length) continue;
-    h += `<div class="day-h${sameDay(d, td) ? ' today' : ''}">יום ${DAYS[d.getDay()]}, ${hebDate(d)}</div>`;
+    h += `<div class="day-h${sameDay(d, td) ? ' today' : ''}">יום ${DAYS[d.getDay()]}, ${hebDate(d)}${holidaysOn(d).length ? ` <span style="color:${HOL_FG[holidayKind(d)]};font-weight:600">· ${esc(holidayLabel(d))}</span>` : ''}</div>`;
     for (const ev of evs) {
       const t = evTimes(ev);
       h += `<div class="li${attended(ev) === 'no' ? ' missed' : ''}" data-id="${esc(ev.id)}"><div class="bar" style="background:${evColor(ev)}"></div><div class="main">
@@ -1756,6 +1791,7 @@ function showMenu() {
     <div class="menu-item"><span style="flex:1">גיבוי</span><button class="btn" id="mBackup">גיבוי עכשיו</button></div>
     <div class="menu-item"><span style="flex:1">קובץ גיבוי</span><button class="btn" id="mExport">ייצוא</button><button class="btn" id="mRestore">שחזור</button></div>
     <label class="check"><input type="checkbox" id="mEmail" ${S.settings.backup_email !== false ? 'checked' : ''}>שליחת הגיבוי היומי למייל</label>
+    <label class="check"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label>
     <h3 style="margin:18px 0 4px">צילומי תשלום</h3>
     <div class="menu-item"><span style="flex:1">מפתח Gemini: ${store.get('geminiKey', '') ? '✓ מוגדר' : 'לא מוגדר'}</span><button class="btn" id="gKeyBtn">${store.get('geminiKey', '') ? 'החלפה' : 'הגדרה'}</button></div>
     <h3 style="margin:18px 0 4px">חשבון</h3>
@@ -1770,6 +1806,7 @@ function showMenu() {
   $('#mExport', sh).onclick = () => { closeSheet(); exportBackupFile(); };
   $('#mRestore', sh).onclick = showRestore;
   $('#mEmail', sh).onchange = e => saveSettings({ ...S.settings, backup_email: e.target.checked });
+  $('#mHol', sh).onchange = e => saveSettings({ ...S.settings, holidays: e.target.checked });
   $('#mClose', sh).onclick = closeSheet;
 }
 
