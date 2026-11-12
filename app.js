@@ -27,7 +27,7 @@ function addHolidays(year, items) {
 }
 async function fetchHolidays(year) {
   if (DEMO) return [{ date: `${year}-12-04`, name: 'ערב חנוכה', kind: 'other' }, { date: `${year}-12-05`, name: 'חנוכה: א׳ נר', kind: 'other' }, { date: `${year}-11-17`, name: 'יום טוב לדוגמה', kind: 'yomtov' }];
-  const q = new URLSearchParams({ v: '1', cfg: 'json', maj: 'on', min: 'on', mod: 'on', mf: 'on', ss: 'off', nx: 'off', s: 'off', c: 'off', i: 'on', lg: 'he', start: `${year}-01-01`, end: `${year}-12-31` });
+  const q = new URLSearchParams({ v: '1', cfg: 'json', maj: 'on', min: 'on', mod: 'on', mf: 'on', ss: 'off', nx: 'off', s: 'off', c: 'off', i: 'on', start: `${year}-01-01`, end: `${year}-12-31` });
   const r = await fetch('https://www.hebcal.com/hebcal?' + q); if (!r.ok) throw new Error('hebcal ' + r.status);
   return ((await r.json()).items || []).filter(it => it.category === 'holiday' && it.date)
     .map(it => ({ date: it.date.slice(0, 10), name: it.hebrew || it.title || '', kind: it.yomtov ? 'yomtov' : 'other' }));
@@ -43,7 +43,7 @@ function ensureHolidays(days) {
     fetchHolidays(y).then(items => {
       const all = store.get('holidays', {}); all[y] = { ts: Date.now(), items }; store.set('holidays', all);
       addHolidays(y, items); renderView.keepScroll = true; renderView();
-    }).catch(() => {}).finally(() => holLoading.delete(y));
+    }).catch(e => toast(`לא הצלחתי לטעון את חגי ישראל (${y}): ${e.message}`)).finally(() => holLoading.delete(y));
   }
 }
 const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash'];
@@ -137,6 +137,9 @@ function cancelLabel(ev) {
 const receiptIssued = ev => props(ev).rcpt_issued === 'yes';
 function clientPrice(name) { const c = (S.settings.clients || {})[(name || '').trim()] || {}; return toAmount(c.price) || toAmount(S.settings.default_price); }
 const evPrice = ev => toAmount(props(ev).price) || clientPrice(title(ev));
+// אירוע שאינו טיפול (למשל ישיבת צוות): לא נספר בסיכומים, במספור ובתשלומים – זהה ל-Windows
+const isSession = ev => props(ev).kind !== 'event';
+const EVENT_COLOR_ID = '8';
 // ---- מייל של המטופל/ת או ההורה, וזימון ליומן (זהה ל-Windows)
 const clientInfo = (name, st = S.settings) => ((st.clients || {})[(name || '').trim()]) || {};
 const clientEmails = (name, st) => (clientInfo(name, st).emails || []).filter(Boolean);
@@ -161,7 +164,7 @@ const sessionAnchor = ev => { const m = sessionMark(ev); return typeof m === 'nu
 function computeNumbers(events) {
   // מספור נפרד לכל מטופל/ת. בלי מספר שנקבע ידנית – לא ידוע. פגישות שלא התקיימו לא נספרות (זהה ל-Windows)
   const by = {}, nums = {};
-  for (const ev of events) { if (evTimes(ev).allDay) continue; (by[title(ev).trim()] = by[title(ev).trim()] || []).push(ev); }
+  for (const ev of events) { if (evTimes(ev).allDay || !isSession(ev)) continue; (by[title(ev).trim()] = by[title(ev).trim()] || []).push(ev); }
   for (const evs of Object.values(by)) {
     evs.sort((a, b) => evTimes(a).s - evTimes(b).s);
     let cur = null, pending = null;  // מספר שנקבע לפגישה שלא התקיימה עובר לפגישה הבאה שמתקיימת
@@ -255,6 +258,7 @@ function currentTz() {
 }
 
 function tagsHtml(ev, short = false) {
+  if (!isSession(ev)) return '';
   const t = []; const a = attended(ev);
   if (a === 'yes') t.push(`<span class="tag ok">${ICON.check}${short ? '' : 'התקיימה'}</span>`);
   else if (a === 'no') t.push(`<span class="tag no">${ICON.x}${short ? '' : 'לא התקיימה' + (cancelLabel(ev) ? ' · ' + esc(cancelLabel(ev)) : '')}</span>`);
@@ -480,7 +484,7 @@ const AI_SYSTEM = `את/ה עוזר/ת אישי/ת של קלינאית תקשו�
 function eventsTable(evs) {
   const rows = ['תאריך | יום | שעה | מטופל/ת | מספר מפגש | הפגישה | סיבת ביטול | מחיר | תשלום | אמצעי | סכום ששולם | תאריך תשלום | קבלה'];
   for (const ev of evs.slice().sort((a, b) => evTimes(a).s - evTimes(b).s)) {
-    const t = evTimes(ev); if (t.allDay) continue;
+    const t = evTimes(ev); if (t.allDay || !isSession(ev)) continue;
     const p = props(ev), pd = paid(ev), pr = evPrice(ev);
     rows.push([isoDate(t.s), DAYS[t.s.getDay()], hm(t.s), title(ev).trim(), sessionNo(ev) ? String(sessionNo(ev)) : '', ({ yes: 'התקיימה', no: 'לא התקיימה' })[attended(ev)] || 'טרם סומן',
       cancelLabel(ev), pr ? String(pr) : '', pd ? 'שולם' : 'לא שולם', pd ? payLabel(ev) : '', pd ? (p.pay_amount || '') : '', pd ? (p.pay_date || '') : '',
@@ -615,7 +619,7 @@ function matchReceipt(info, events) {
   const srcText = `${info.payer_name || ''} ${info.description || ''}`;
   const src = tokens(srcText);
   const by = {};
-  for (const ev of events) { if (evTimes(ev).allDay || !canEdit(ev)) continue; (by[title(ev).trim()] = by[title(ev).trim()] || []).push(ev); }
+  for (const ev of events) { if (evTimes(ev).allDay || !canEdit(ev) || !isSession(ev)) continue; (by[title(ev).trim()] = by[title(ev).trim()] || []).push(ev); }
   return Object.entries(by).map(([name, evs]) => {
     let score = name && srcText.includes(name) ? 5 : 0;
     for (const t of tokens(name)) if (src.has(t)) score += 2;
@@ -975,7 +979,7 @@ function stats(evs) {
 function summaryGroups() {
   const groups = {};
   for (const ev of S.events) {
-    if (evTimes(ev).allDay) continue;
+    if (evTimes(ev).allDay || !isSession(ev)) continue;
     const name = title(ev).trim();
     if (S.sumClient && name !== S.sumClient) continue;
     if (S.sumFilter === 'held' && attended(ev) !== 'yes') continue;
@@ -987,7 +991,7 @@ function summaryGroups() {
   return Object.keys(groups).sort((a, b) => a.localeCompare(b, 'he')).map(k => [k, groups[k]]);
 }
 function summaryHtml() {
-  const names = [...new Set(S.events.filter(e => !evTimes(e).allDay).map(e => title(e).trim()))].sort((a, b) => a.localeCompare(b, 'he'));
+  const names = [...new Set(S.events.filter(e => !evTimes(e).allDay && isSession(e)).map(e => title(e).trim()))].sort((a, b) => a.localeCompare(b, 'he'));
   if (S.sumClient && !names.includes(S.sumClient)) S.sumClient = '';
   const groups = summaryGroups();
   const all = groups.flatMap(g => g[1]);
@@ -1058,7 +1062,7 @@ function bindView() {
     let m = sh * 60 + (e.clientY - rect.top - 5) * 60 / H;
     m = Math.max(0, Math.min(23 * 60 + 45, Math.floor(m / 15) * 15));
     const d = parseDateOnly(col.dataset.col); d.setHours(Math.floor(m / 60), m % 60);
-    showForm({ start: d });
+    showNewMenu(d);
   }));
   main.querySelectorAll('.tg-head [data-day]').forEach(el => el.addEventListener('click', () => { if (S.view === 'week') goDay(parseDateOnly(el.dataset.day)); }));
   main.querySelectorAll('.mo-cell').forEach(el => el.addEventListener('click', () => goDay(parseDateOnly(el.dataset.day))));
@@ -1086,7 +1090,7 @@ function openSheet(html) {
 }
 function closeSheet() { $('#sheet').hidden = true; $('#sheetBack').hidden = true; $('#sheet').innerHTML = ''; }
 function alertSheet(t, msg) {
-  const sh = openSheet(`<h3 style="margin:4px 0 8px">${esc(t)}</h3><p>${esc(msg)}</p><div class="actions"><button class="btn primary" id="okBtn">אישור</button></div>`);
+  const sh = openSheet(`<h3 style="margin:4px 0 8px">${esc(t)}</h3><p style="white-space:pre-line">${esc(msg)}</p><div class="actions"><button class="btn primary" id="okBtn">אישור</button></div>`);
   $('#okBtn', sh).onclick = closeSheet;
 }
 function choose(t, msg, options) {
@@ -1113,9 +1117,10 @@ function showDetails(ev) {
     ${ev.description ? `<div class="k">הערות</div><div style="white-space:pre-wrap">${esc(ev.description)}</div>` : ''}
     <div class="k">יומן</div><div>${esc(ev._calendar || '')}</div>
     ${hasGuests(ev) ? `<div class="k">זימון</div><div dir="auto">${esc((ev.attendees || []).filter(a => !a.self).map(a => a.email).join(', '))} <span class="note">(קיבלו זימון ליומן)</span></div>` : ''}
-    ${t.allDay ? '' : `<div class="k">מפגש</div><div>${a === 'no' ? '<span class="note">— (פגישה שלא התקיימה לא נספרת)</span>' : `${sessionNo(ev) ? 'מפגש ' + sessionNo(ev) : 'לא ידוע'}${sessionAnchor(ev) ? ' <span class="note">(נקבע ידנית)</span>' : ''}${sessionMark(ev) === 'stop' ? ' <span class="note">(לא ידוע מכאן והלאה)</span>' : ''} ${edit ? '<button class="btn" id="numBtn" style="padding:3px 10px;font-size:13px;margin-inline-start:6px">שינוי</button>' : ''}`}</div>`}
-    ${t.allDay ? '' : `<div class="k">מחיר</div><div>${evPrice(ev) ? fmtMoney(evPrice(ev)) + (toAmount(props(ev).price) ? '' : ' <span class="note">(ברירת מחדל)</span>') : '<span class="note">לא נקבע (אפשר לקבוע ב„עריכה” או ב-☰ ← מחירי טיפול)</span>'}</div>`}</div>`;
-  if (!t.allDay) {
+    ${!isSession(ev) ? '<div class="k">סוג</div><div class="note">אירוע (לא טיפול) – לא נספר בסיכומים, במספור ובתשלומים</div>' : ''}
+    ${t.allDay || !isSession(ev) ? '' : `<div class="k">מפגש</div><div>${a === 'no' ? '<span class="note">— (פגישה שלא התקיימה לא נספרת)</span>' : `${sessionNo(ev) ? 'מפגש ' + sessionNo(ev) : 'לא ידוע'}${sessionAnchor(ev) ? ' <span class="note">(נקבע ידנית)</span>' : ''}${sessionMark(ev) === 'stop' ? ' <span class="note">(לא ידוע מכאן והלאה)</span>' : ''} ${edit ? '<button class="btn" id="numBtn" style="padding:3px 10px;font-size:13px;margin-inline-start:6px">שינוי</button>' : ''}`}</div>`}
+    ${t.allDay || !isSession(ev) ? '' : `<div class="k">מחיר</div><div>${evPrice(ev) ? fmtMoney(evPrice(ev)) + (toAmount(props(ev).price) ? '' : ' <span class="note">(ברירת מחדל)</span>') : '<span class="note">לא נקבע (אפשר לקבוע ב„עריכה” או ב-☰ ← מחירי טיפול)</span>'}</div>`}</div>`;
+  if (!t.allDay && isSession(ev)) {
     h += `<div class="sec">הפגישה</div><div class="seg">
         <button class="btn ${a === 'yes' ? 'on' : ''}" data-att="yes" ${dis}>✓ התקיימה</button>
         <button class="btn ${a === 'no' ? 'on' : ''}" data-att="no" ${dis}>✗ לא התקיימה</button></div>
@@ -1241,7 +1246,7 @@ function showReceiptIssued(ev) {
   $('#rcSave', sh).onclick = () => { setStatus(ev, { rcpt_issued: 'yes', rcpt_no: $('#rcNum', sh).value.trim(), rcpt_date: $('#rcDate', sh).value }); showDetails(ev); };
 }
 function showPrices() {
-  const names = [...new Set([...S.events, ...S.index].filter(e => !evTimes(e).allDay).map(e => title(e).trim()).concat(Object.keys(S.settings.clients || {})))].sort((a, b) => a.localeCompare(b, 'he'));
+  const names = [...new Set([...S.events, ...S.index].filter(e => !evTimes(e).allDay && isSession(e)).map(e => title(e).trim()).concat(Object.keys(S.settings.clients || {})))].sort((a, b) => a.localeCompare(b, 'he'));
   const sh = openSheet(`<h3 style="margin:4px 0 6px">מטופלים: מחירים ומיילים</h3>
     <div class="field"><label>מחיר ברירת מחדל לטיפול (₪)</label><input type="text" inputmode="decimal" dir="ltr" id="pDef" placeholder="למשל 250" value="${toAmount(S.settings.default_price) || ''}"></div>
     <p class="note">מחיר: שדה ריק = ברירת המחדל. מייל: של המטופל/ת או של ההורה (אפשר כמה, מופרדים בפסיק). „זימון ליומן”: הפגישות יישלחו כהזמנה ליומן של המייל, וכל שינוי שעה או ביטול יעדכן אותם.</p>
@@ -1293,7 +1298,7 @@ function futureSessions(name) {
   // הפגישות העתידיות של מטופל/ת: סדרה (פעם אחת לכל סדרה) או פגישה בודדת
   const now = new Date(), seen = new Map();
   for (const e of S.index) {
-    if (title(e).trim() !== name || !canEdit(e) || evTimes(e).allDay || evTimes(e).s < now) continue;
+    if (title(e).trim() !== name || !canEdit(e) || !isSession(e) || evTimes(e).allDay || evTimes(e).s < now) continue;
     const key = e._calendar_id + '|' + (e.recurringEventId || e.id);
     if (!seen.has(key)) seen.set(key, [e._calendar_id, e.recurringEventId || e.id]);
   }
@@ -1339,7 +1344,7 @@ function mdToHtml(md) {
 const AI = { history: [], key: null, data: '', transcript: [] };
 function showAI() {
   if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(showAI); return; }
-  const names = [...new Set([...S.events.map(e => title(e).trim()), ...Object.keys(S.settings.clients || {})])].sort((a, b) => a.localeCompare(b, 'he'));
+  const names = [...new Set([...S.events.filter(isSession).map(e => title(e).trim()), ...Object.keys(S.settings.clients || {})])].sort((a, b) => a.localeCompare(b, 'he'));
   const sh = openSheet(`<h3 style="margin:4px 0 6px">שאלה ל-AI על הטיפולים</h3>
     <div class="two"><select id="aiRange">${AI_RANGES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
       <select id="aiClient"><option value="">כל המטופלים</option>${names.map(n => `<option>${esc(n)}</option>`).join('')}</select></div>
@@ -1587,9 +1592,23 @@ function askGeminiKey(then) {
 
 // ---- טופס פגישה (חדשה / עריכה)
 const timeInput = (id, d) => `<input type="time" id="${id}" step="300" value="${hm(d)}" dir="ltr">`;
-function showForm({ start = null, ev = null, mode = 'new', master = null } = {}) {
-  // mode: new | single | instance | series
+function showNewMenu(start = null) {
+  // + חדש: מטופל/ת חדש/ה, פגישה למטופל/ת קיים/ת, או אירוע חד-פעמי
+  const sh = openSheet(`<h3 style="margin:4px 0 10px">מה להוסיף?</h3>
+    <div class="actions" style="flex-direction:column">
+      <button class="btn primary" data-p="client" style="padding:14px">👤 מטופל/ת חדש/ה (סדרת טיפולים)</button>
+      <button class="btn" data-p="event" style="padding:14px">🗓 פגישה / אירוע חד-פעמי</button>
+      <button class="btn" data-p="">ביטול</button></div>`);
+  sh.querySelectorAll('[data-p]').forEach(b => b.onclick = () => { if (!b.dataset.p) closeSheet(); else showForm({ start, purpose: b.dataset.p }); });
+}
+const clientNames = () => [...new Set([...S.index, ...S.events].filter(e => isSession(e) && !evTimes(e).allDay).map(e => title(e).trim()).concat(Object.keys(S.settings.clients || {})))].sort((a, b) => a.localeCompare(b, 'he'));
+function showForm({ start = null, ev = null, mode = 'new', master = null, purpose = 'session', oneTime = false } = {}) {
+  // mode: new | single | instance | series ; purpose: session | client | event
   const editing = !!ev;
+  if (editing && !isSession(ev)) purpose = 'event';
+  const isEv = purpose === 'event', isClient = purpose === 'client';
+  // חד-פעמי חדש: אירוע (לא טיפול), או פגישת טיפול חד-פעמית למטופל/ת קיים/ת
+  oneTime = !editing && (oneTime || isEv);
   let s, e;
   if (editing) { const t = evTimes(ev); s = t.s; e = t.e; }
   else {
@@ -1602,7 +1621,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null } = {})
   let rem = 30;
   if (editing) { const o = (ev.reminders && ev.reminders.overrides) || []; if (o.length) rem = o[0].minutes; else if (ev.reminders && ev.reminders.useDefault === false) rem = 0; }
   const remOpts = REMINDERS.some(r => r[0] === rem) ? REMINDERS : [...REMINDERS, [rem, `${rem} דק׳ לפני`]].sort((a, b) => a[0] - b[0]);
-  let count = 10, repeatLabel = 'חוזר כל שבוע', repeatNote = '';
+  let count = isClient ? 0 : 10, repeatLabel = 'חוזר כל שבוע', repeatNote = '';
   if (mode === 'series' && master) {
     const info = rruleInfo(master.recurrence);
     count = info.count || (info.until ? 10 : 0);
@@ -1612,26 +1631,42 @@ function showForm({ start = null, ev = null, mode = 'new', master = null } = {})
   } else if (mode === 'instance') repeatNote = 'כדי לשנות את מספר הפגישות, עורכים את „כל הפגישות בסדרה”.';
   const counts = [...Array.from({ length: 51 }, (_, i) => i + 2)];
   if (count && !counts.includes(count)) counts.push(count), counts.sort((a, b) => a - b);
-  const showRepeat = ['new', 'single', 'series'].includes(mode);
-  const sh = openSheet(`<h3 style="margin:4px 0 6px">${editing ? 'עריכת פגישה' : 'פגישה חדשה'}</h3>
+  const showRepeat = ['new', 'single', 'series'].includes(mode) && !isEv && !oneTime;
+  const heading = oneTime ? 'פגישה / אירוע חד-פעמי' : isEv ? 'עריכת אירוע' : isClient ? 'מטופל/ת חדש/ה' : (editing ? 'עריכת פגישה' : 'פגישה למטופל/ת קיים/ת');
+  const names = clientNames();
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">${heading}</h3>
+    ${oneTime ? `<label class="check"><input type="checkbox" id="fTherapy" ${isEv ? '' : 'checked'}>זו פגישת טיפול חד-פעמית למטופל/ת קיים/ת</label>` : ''}
+    ${isEv ? '<p class="note">אירוע שאינו טיפול: מוצג ביומן באפור, ולא נספר בסיכומים, במספור המפגשים ובתשלומים.</p>' : ''}
     ${mode === 'series' ? '<p class="note">השינויים יחולו על כל הפגישות בסדרה.</p>' : ''}
     ${!editing ? `<div class="field"><label>יומן</label><select id="fCal">${cals.map(c => `<option value="${esc(c.id)}" ${c.id === defCal ? 'selected' : ''}>${esc(calName(c))}${c.primary ? ' (ראשי)' : ''}</option>`).join('')}</select></div>` : ''}
-    <div class="field"><label>מטופל/ת</label><input type="text" id="fName" placeholder="שם המטופל/ת" value="${esc(editing ? ev.summary || '' : '')}"></div>
-    <div class="field"><label>תאריך</label><input type="date" id="fDate" value="${isoDate(s)}" ${mode === 'series' ? 'disabled' : ''}></div>
+    <div class="field"><label>${isEv ? 'כותרת' : isClient ? 'מטופל/ת חדש/ה' : 'מטופל/ת'}</label><input type="text" id="fName" ${purpose === 'session' ? 'list="fNames"' : ''} placeholder="${isEv ? 'למשל: ישיבת צוות, השתלמות, הדרכה…' : 'שם המטופל/ת'}" value="${esc(editing ? ev.summary || '' : '')}">
+      ${purpose === 'session' ? `<datalist id="fNames">${names.map(n => `<option value="${esc(n)}">`).join('')}</datalist>` : ''}</div>
+    <div class="field"><label>${isClient ? 'פגישה ראשונה' : 'תאריך'}</label><input type="date" id="fDate" value="${isoDate(s)}" ${mode === 'series' ? 'disabled' : ''}></div>
     <div class="two"><div class="field"><label>שעת התחלה</label>${timeInput('fStart', s)}</div>
       <div class="field"><label>שעת סיום <span id="fLen" class="note"></span></label>${timeInput('fEnd', e)}</div></div>
     <div class="field"><label>מיקום</label><input type="text" id="fLoc" placeholder="קליניקה, ביקור בית, בית ספר, אונליין…" value="${esc(editing ? ev.location || '' : '')}"></div>
-    <div class="field"><label>מחיר (₪) <span class="note" id="fPriceNote"></span></label><input type="text" inputmode="decimal" dir="ltr" id="fPrice" placeholder="לא חובה"></div>
-    ${!editing ? `<div class="field"><label class="check"><input type="checkbox" id="fInvite">לשלוח זימון ליומן של:</label>
+    <div class="field" ${isEv ? 'hidden' : ''}><label>מחיר (₪) <span class="note" id="fPriceNote"></span></label><input type="text" inputmode="decimal" dir="ltr" id="fPrice" placeholder="לא חובה"></div>
+    ${!editing && !isEv ? `<div class="field"><label class="check"><input type="checkbox" id="fInvite">לשלוח זימון ליומן של:</label>
       <input type="email" dir="ltr" id="fEmails" placeholder="מייל של המטופל/ת או ההורה"></div>` : ''}
     ${showRepeat ? `<div class="field"><label>חזרה</label><div class="two" style="align-items:center">
-        <label class="check"><input type="checkbox" id="fWeekly" ${mode === 'series' ? 'checked disabled' : ''}>${repeatLabel}</label>
-        <select id="fCount" ${mode === 'series' ? '' : 'disabled'}>${counts.map(n => `<option value="${n}" ${n === count ? 'selected' : ''}>${n} פגישות</option>`).join('')}<option value="0" ${count === 0 ? 'selected' : ''}>ללא תאריך סיום</option></select></div></div>` : ''}
+        <label class="check"><input type="checkbox" id="fWeekly" ${mode === 'series' ? 'checked disabled' : isClient ? 'checked' : ''}>${repeatLabel}</label>
+        <select id="fCount" ${mode === 'series' || isClient ? '' : 'disabled'}>${counts.map(n => `<option value="${n}" ${n === count ? 'selected' : ''}>${n} פגישות</option>`).join('')}<option value="0" ${count === 0 ? 'selected' : ''}>ללא תאריך סיום</option></select></div></div>` : ''}
     ${repeatNote ? `<p class="note">${esc(repeatNote)}</p>` : ''}
+    ${isClient && !editing ? `<div class="field"><label class="check"><input type="checkbox" id="fNoOn" checked>המפגש הראשון הוא מפגש מספר
+      <input type="number" inputmode="numeric" min="1" max="999" id="fNo" value="1" dir="ltr" style="width:80px;flex:none;min-height:36px;padding:4px 8px;margin-inline-start:6px"></label></div>` : ''}
     <div class="field"><label>תזכורת</label><select id="fRem">${remOpts.map(([m, l]) => `<option value="${m}" ${m === rem ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div class="field"><label>הערות</label><textarea id="fNotes" rows="3" placeholder="הערות (לא חובה)">${esc(editing ? ev.description || '' : '')}</textarea></div>
     <p class="err" id="fErr"></p>
     <div class="actions"><button class="btn primary" id="fSave">${editing ? 'שמירה' : 'הוספה'}</button><button class="btn" id="fCancel">ביטול</button></div>`);
+  const th = $('#fTherapy', sh);
+  if (th) th.onchange = () => {
+    const keep = { name: $('#fName', sh).value, date: $('#fDate', sh).value, st: $('#fStart', sh).value, en: $('#fEnd', sh).value, loc: $('#fLoc', sh).value, notes: $('#fNotes', sh).value };
+    showForm({ start: fromInputs(keep.date, keep.st), purpose: th.checked ? 'session' : 'event', oneTime: true });
+    const sh2 = $('#sheet');
+    if (!th.checked) $('#fName', sh2).value = keep.name;
+    $('#fEnd', sh2).value = keep.en; $('#fLoc', sh2).value = keep.loc; $('#fNotes', sh2).value = keep.notes;
+    $('#fEnd', sh2).dispatchEvent(new Event('change'));
+  };
   let dur = Math.max(5, Math.round((e - s) / 60000));
   const fs = $('#fStart', sh), fe = $('#fEnd', sh), fl = $('#fLen', sh);
   const toM = v => { const [h, m] = v.split(':').map(Number); return h * 60 + m; };
@@ -1645,13 +1680,14 @@ function showForm({ start = null, ev = null, mode = 'new', master = null } = {})
   if (own) { fp.value = own; priceTouched = true; }
   let inviteFor = null;
   const prefill = () => {
+    if (isEv) return;
     const name = fn.value.trim(), known = name in (S.settings.clients || {}), pr = clientPrice(name);
     if (!editing && inviteFor !== name) { inviteFor = name; $('#fEmails', sh).value = clientEmails(name).join(', '); $('#fInvite', sh).checked = clientInvites(name); }
     if (!priceTouched) fp.value = pr || '';
     fpn.textContent = !name ? '' : known ? '(מחיר המטופל/ת)' : editing ? '' : '(מטופל/ת חדש/ה · יישמר כברירת מחדל)';
   };
   fp.oninput = () => { priceTouched = true; };
-  if (!editing) $('#fEmails', sh).oninput = e => { $('#fInvite', sh).checked = !!e.target.value.trim(); };
+  if (!editing && !isEv) $('#fEmails', sh).oninput = e => { $('#fInvite', sh).checked = !!e.target.value.trim(); };
   fn.addEventListener('change', prefill); fn.addEventListener('blur', prefill); prefill();
   const wk = $('#fWeekly', sh), cnt = $('#fCount', sh);
   if (wk && mode !== 'series') wk.onchange = () => { cnt.disabled = !wk.checked; };
@@ -1661,13 +1697,17 @@ function showForm({ start = null, ev = null, mode = 'new', master = null } = {})
   $('#fCancel', sh).onclick = () => { if (editing) showDetails(ev); else closeSheet(); };
   $('#fSave', sh).onclick = async () => {
     const name = $('#fName', sh).value.trim();
-    if (!name) { $('#fErr', sh).textContent = 'יש למלא את שם המטופל/ת.'; return; }
+    if (!name) { $('#fErr', sh).textContent = isEv ? 'יש למלא כותרת.' : 'יש למלא את שם המטופל/ת.'; return; }
+    if (isClient && !editing && names.includes(name)) {
+      const go = await choose('מטופל/ת חדש/ה', `כבר יש ביומן מטופל/ת בשם „${name}”. להוסיף בכל זאת?`, [{ label: 'כן, להוסיף', value: true, cls: 'primary' }]);
+      if (!go) return;
+    }
     const st = fromInputs($('#fDate', sh).value, fs.value), en = fromInputs($('#fDate', sh).value, fe.value);
     if (!(en > st)) { $('#fErr', sh).textContent = 'שעת הסיום צריכה להיות אחרי שעת ההתחלה.'; return; }
     if (fp.value.trim() && !toAmount(fp.value)) { $('#fErr', sh).textContent = 'המחיר צריך להיות מספר, למשל 250.'; return; }
     const price = toAmount(fp.value);
     let emails = [], invite = false;
-    if (!editing) {
+    if (!editing && !isEv) {
       const [ok, bad] = parseEmails($('#fEmails', sh).value);
       if (bad.length) { $('#fErr', sh).textContent = `המייל לא תקין: ${bad.join(', ')}`; return; }
       emails = ok; invite = $('#fInvite', sh).checked;
@@ -1676,21 +1716,37 @@ function showForm({ start = null, ev = null, mode = 'new', master = null } = {})
     const tz = currentTz();
     const body = { summary: name, start: { dateTime: localStr(st), timeZone: tz }, end: { dateTime: localStr(en), timeZone: tz },
       location: $('#fLoc', sh).value.trim(), description: $('#fNotes', sh).value.trim() };
-    if (!editing) { if (price) body.extendedProperties = { private: { price: String(price) } }; }
+    const firstNo = isClient && !editing && $('#fNoOn', sh) && $('#fNoOn', sh).checked ? Number($('#fNo', sh).value) || 1 : null;
+    if (isEv) { if (!editing) { body.extendedProperties = { private: { kind: 'event' } }; body.colorId = EVENT_COLOR_ID; } }
+    else if (!editing) {
+      const pr = {}; if (price) pr.price = String(price);
+      if (firstNo && !(wk && wk.checked)) pr.session_no = String(firstNo);
+      if (Object.keys(pr).length) body.extendedProperties = { private: pr };
+    }
     else if (mode === 'series') body.extendedProperties = { private: { price: price ? String(price) : '' } };
     else body.extendedProperties = { private: { ...props(ev), price: price ? String(price) : '' } };
     if (!editing || remTouched) { const m = Number($('#fRem', sh).value); body.reminders = { useDefault: false, overrides: m > 0 ? [{ method: 'popup', minutes: m }] : [] }; }
     const c = cnt ? Number(cnt.value) : 0;
-    if ((mode === 'new' || mode === 'single') && wk && wk.checked) body.recurrence = ['RRULE:FREQ=WEEKLY' + (c ? ';COUNT=' + c : '')];
+    if (isEv) { /* אירוע חד-פעמי: בלי חזרה */ }
+    else if ((mode === 'new' || mode === 'single') && wk && wk.checked) body.recurrence = ['RRULE:FREQ=WEEKLY' + (c ? ';COUNT=' + c : '')];
     else if (mode === 'series' && master && cntTouched) body.recurrence = rruleWithCount(master.recurrence, c);
     const btn = $('#fSave', sh); btn.disabled = true; btn.textContent = 'שומר…';
     try {
       if (!editing && invite) Object.assign(body, attendeeFields(emails));
-      if (!editing) await G.insert($('#fCal', sh).value, body, invite);
+      if (!editing) {
+        const calId = $('#fCal', sh).value;
+        const created = await G.insert(calId, body, invite);
+        if (firstNo && body.recurrence) {
+          // מספר המפגש נשמר על המופע הראשון בסדרה (לא על הסדרה, אחרת כל המופעים יקבלו אותו)
+          const inst = await api('GET', `/calendars/${enc(calId)}/events/${enc(created.id)}/instances`, null, qs({ maxResults: 1 }));
+          const first = (inst.items || [])[0];
+          if (first) await G.setProps(calId, first.id, { ...props(first), session_no: String(firstNo) });
+        }
+      }
       else if (mode === 'series') await G.updateSeries(ev._calendar_id, ev.recurringEventId, body, tz, hasGuests(ev));
       else await G.patch(ev._calendar_id, ev.id, body, hasGuests(ev));
-      closeSheet(); toast(editing ? 'השינויים נשמרו' : `נוספה פגישה: ${name}`);
-      if (!editing) {
+      closeSheet(); toast(editing ? 'השינויים נשמרו' : isEv ? `נוסף אירוע: ${name}` : `נוספה פגישה: ${name}`);
+      if (!editing && !isEv) {
         const info = { ...clientInfo(name) }, before = JSON.stringify(info);
         if (price && !('price' in info) && !(name in (S.settings.clients || {}))) info.price = price;
         if (emails.length) info.emails = emails;
@@ -1791,7 +1847,7 @@ function showMenu() {
     <div class="menu-item"><span style="flex:1">גיבוי</span><button class="btn" id="mBackup">גיבוי עכשיו</button></div>
     <div class="menu-item"><span style="flex:1">קובץ גיבוי</span><button class="btn" id="mExport">ייצוא</button><button class="btn" id="mRestore">שחזור</button></div>
     <label class="check"><input type="checkbox" id="mEmail" ${S.settings.backup_email !== false ? 'checked' : ''}>שליחת הגיבוי היומי למייל</label>
-    <label class="check"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label>
+    <div class="menu-item"><label class="check" style="flex:1"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label><button class="btn" id="mHolRefresh">רענון</button></div>
     <h3 style="margin:18px 0 4px">צילומי תשלום</h3>
     <div class="menu-item"><span style="flex:1">מפתח Gemini: ${store.get('geminiKey', '') ? '✓ מוגדר' : 'לא מוגדר'}</span><button class="btn" id="gKeyBtn">${store.get('geminiKey', '') ? 'החלפה' : 'הגדרה'}</button></div>
     <h3 style="margin:18px 0 4px">חשבון</h3>
@@ -1807,6 +1863,16 @@ function showMenu() {
   $('#mRestore', sh).onclick = showRestore;
   $('#mEmail', sh).onchange = e => saveSettings({ ...S.settings, backup_email: e.target.checked });
   $('#mHol', sh).onchange = e => saveSettings({ ...S.settings, holidays: e.target.checked });
+  $('#mHolRefresh', sh).onclick = async () => {
+    const y = new Date().getFullYear();
+    try {
+      const items = await fetchHolidays(y);
+      const all = store.get('holidays', {}); all[y] = { ts: Date.now(), items }; store.set('holidays', all); addHolidays(y, items);
+      const next = items.filter(h => h.date >= isoDate(today())).slice(0, 3).map(h => `• ${dmy(parseDateOnly(h.date))} – ${h.name}`).join('\n');
+      alertSheet('חגי ישראל', `נטענו ${items.length} חגים ומועדים לשנת ${y}.` + (next ? `\n\nהקרובים:\n${next}` : ''));
+      renderView.keepScroll = true; renderView();
+    } catch (e) { alertSheet('חגי ישראל', 'לא הצלחתי לטעון את חגי ישראל מ-hebcal.com. בודקים שיש חיבור לאינטרנט.\n' + e.message); }
+  };
   $('#mClose', sh).onclick = closeSheet;
 }
 
@@ -1880,6 +1946,10 @@ const Mock = {
     if (path === '/users/me/calendarList') return { items: [{ id: 'chenorlan@gmail.com', summary: 'chenorlan@gmail.com', primary: true, accessRole: 'owner', backgroundColor: '#7986CB', timeZone: DEFAULT_TZ }] };
     const parts = path.split('/').map(decodeURIComponent); // ['', 'calendars', id, 'events', evId?]
     const evId = parts[4];
+    if (method === 'GET' && parts[5] === 'instances') {
+      const m = this.data.masters[evId]; if (!m) return { items: [] };
+      const t0 = evTimes(m); return { items: this.expand(t0.s, addDays(t0.s, 1)).filter(e => e.recurringEventId === evId).slice(0, 1) };
+    }
     if (method === 'GET' && !evId) return { items: this.expand(new Date(p.get('timeMin')), new Date(p.get('timeMax'))) };
     if (method === 'GET') { const ev = this.find(evId); if (!ev) throw new Error('Not found'); return JSON.parse(JSON.stringify(ev)); }
     if (method === 'POST') { const id = 'n' + Date.now(); this.data.masters[id] = { ...body, id }; return this.data.masters[id]; }
@@ -1905,7 +1975,7 @@ function init() {
   $('#todayBtn').onclick = () => { S.anchor = today(); S.loaded = false; renderView(); loadEvents(); };
   $('#prevBtn').onclick = () => step(-1);
   $('#nextBtn').onclick = () => step(1);
-  $('#fab').onclick = () => showForm({});
+  $('#fab').onclick = () => showNewMenu();
   $('#sheetBack').onclick = closeSheet;
   document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => setView(b.dataset.view));
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); } });
