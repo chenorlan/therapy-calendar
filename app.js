@@ -1,3 +1,4 @@
+const APP_VERSION = '22 (ממסר Morning)';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -2276,7 +2277,8 @@ function showMenu() {
     <h3 style="margin:18px 0 4px">חשבון</h3>
     <div class="menu-item"><span style="flex:1" dir="ltr">${esc(S.email || '')}</span></div>
     <div class="actions"><button class="btn danger" id="soBtn">התנתקות</button><button class="btn" id="mClose">סגירה</button></div>
-    <p class="note" style="margin-top:14px">כל הנתונים נשמרים ב-Google Calendar, ולכן הם זהים בטלפון ובמחשב.</p>`);
+    <p class="note" style="margin-top:14px">כל הנתונים נשמרים ב-Google Calendar, ולכן הם זהים בטלפון ובמחשב.</p>
+    <p class="note">גרסה ${APP_VERSION}</p>`);
   sh.querySelectorAll('input[name=cal]').forEach(r => r.onchange = () => { S.calId = r.value; store.set('calId', r.value); closeSheet(); S.loaded = false; renderView(); loadEvents(); });
   $('#soBtn', sh).onclick = signOut;
   $('#gKeyBtn', sh).onclick = () => askGeminiKey(null);
