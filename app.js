@@ -436,11 +436,12 @@ const G = {
     if (Object.entries(p).some(([k, v]) => v && stored[k] !== v)) throw new Error('Google קיבל את הבקשה אבל לא שמר את הסימון.');
     return fresh;
   },
-  async updateSeries(c, masterId, body, tz, notify = false) {
+  async updateSeries(c, masterId, body, tz, notify = false, newDate = null) {
     const m = await G.get(c, masterId);
     const ms = m.start || {};
-    const mdate = ms.dateTime ? new Date(ms.dateTime) : parseDateOnly(ms.date);
+    let mdate = ms.dateTime ? new Date(ms.dateTime) : parseDateOnly(ms.date);
     body = { ...body };
+    if (newDate && !sameDay(newDate, mdate)) { mdate = newDate; body.recurrence = rruleWithWeekday(body.recurrence || m.recurrence, newDate); }
     if (body.extendedProperties) body.extendedProperties = { private: { ...((m.extendedProperties || {}).private || {}), ...body.extendedProperties.private } };
     if (body.start) {
       const ns = new Date(body.start.dateTime), ne = new Date(body.end.dateTime);
@@ -738,6 +739,12 @@ function rruleInfo(rec) {
   const rule = (rec || []).find(r => r.toUpperCase().startsWith('RRULE:')) || '';
   const parts = Object.fromEntries(rule.slice(6).split(';').filter(x => x.includes('=')).map(x => x.split('=')));
   return { interval: Number(parts.INTERVAL || 1), count: /^\d+$/.test(parts.COUNT || '') ? Number(parts.COUNT) : 0, until: parts.UNTIL };
+}
+const WEEKDAY_CODES = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+function rruleWithWeekday(rec, d) {
+  // תאריך התחלה חדש לסדרה: מעדכנים BYDAY ליום החדש, ותאריכים שבוטלו בסדרה הישנה כבר לא רלוונטיים (זהה ל-Windows)
+  return (rec || []).filter(r => !/^EXDATE/i.test(r)).map(r => /^RRULE:/i.test(r)
+    ? 'RRULE:' + r.slice(6).split(';').filter(Boolean).map(x => /^BYDAY=/i.test(x) ? 'BYDAY=' + WEEKDAY_CODES[d.getDay()] : x).join(';') : r);
 }
 function rruleWithCount(rec, count) {
   const out = []; let done = false;
@@ -1882,6 +1889,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
   const counts = [...Array.from({ length: 51 }, (_, i) => i + 2)];
   if (count && !counts.includes(count)) counts.push(count), counts.sort((a, b) => a - b);
   const showRepeat = ['new', 'single', 'series'].includes(mode) && !isEv && !oneTime;
+  const seriesFirst = mode === 'series' && master && master.start && master.start.dateTime ? (d => new Date(d.getFullYear(), d.getMonth(), d.getDate()))(new Date(master.start.dateTime)) : null;
   const heading = oneTime ? 'פגישה / אירוע חד-פעמי' : isEv ? 'עריכת אירוע' : isClient ? 'מטופל/ת חדש/ה' : (editing ? 'עריכת פגישה' : 'פגישה למטופל/ת קיים/ת');
   const names = clientNames();
   const sh = openSheet(`<h3 style="margin:4px 0 6px">${heading}</h3>
@@ -1891,7 +1899,8 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
     ${!editing ? `<div class="field"><label>יומן</label><select id="fCal">${cals.map(c => `<option value="${esc(c.id)}" ${c.id === defCal ? 'selected' : ''}>${esc(calName(c))}${c.primary ? ' (ראשי)' : ''}</option>`).join('')}</select></div>` : ''}
     <div class="field"><label>${isEv ? 'כותרת' : isClient ? 'מטופל/ת חדש/ה' : 'מטופל/ת'}</label><input type="text" id="fName" ${purpose === 'session' ? 'list="fNames"' : ''} placeholder="${isEv ? 'למשל: ישיבת צוות, השתלמות, הדרכה…' : 'שם המטופל/ת'}" value="${esc(editing ? ev.summary || '' : '')}">
       ${purpose === 'session' ? `<datalist id="fNames">${names.map(n => `<option value="${esc(n)}">`).join('')}</datalist>` : ''}</div>
-    <div class="field"><label>${isClient ? 'פגישה ראשונה' : 'תאריך'}</label><input type="date" id="fDate" value="${isoDate(s)}" ${mode === 'series' ? 'disabled' : ''}></div>
+    <div class="field"><label>${isClient ? 'פגישה ראשונה' : seriesFirst ? 'תחילת הסדרה (הפגישה הראשונה)' : 'תאריך'}</label><input type="date" id="fDate" value="${isoDate(seriesFirst || s)}" ${mode === 'series' && !seriesFirst ? 'disabled' : ''}>
+      ${seriesFirst ? '<p class="note">אפשר לשנות, למשל אם הטיפולים התחילו בתאריך אחר ממה שהוזן.</p>' : ''}</div>
     <div class="two"><div class="field"><label>שעת התחלה</label>${timeInput('fStart', s)}</div>
       <div class="field"><label>שעת סיום <span id="fLen" class="note"></span></label>${timeInput('fEnd', e)}</div></div>
     <div class="field"><label>מיקום</label><input type="text" id="fLoc" placeholder="קליניקה, ביקור בית, בית ספר, אונליין…" value="${esc(editing ? ev.location || '' : '')}"></div>
@@ -1980,7 +1989,30 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
     if (isEv) { /* אירוע חד-פעמי: בלי חזרה */ }
     else if ((mode === 'new' || mode === 'single') && wk && wk.checked) body.recurrence = ['RRULE:FREQ=WEEKLY' + (c ? ';COUNT=' + c : '')];
     else if (mode === 'series' && master && cntTouched) body.recurrence = rruleWithCount(master.recurrence, c);
-    const btn = $('#fSave', sh); btn.disabled = true; btn.textContent = 'שומר…';
+    let newStart = null, keepNo = null;
+    if (seriesFirst) {
+      const nd = parseDateOnly($('#fDate', sh).value);
+      if (!sameDay(nd, seriesFirst)) {
+        newStart = nd;
+        const series = S.index.filter(e => e.recurringEventId === ev.recurringEventId).sort((a, b) => evTimes(a).s - evTimes(b).s);
+        const firstEv = series.length && sameDay(evTimes(series[0]).s, seriesFirst) ? series[0] : null;
+        keepNo = firstEv ? sessionAnchor(firstEv) : null;
+        let msg;
+        if (nd < seriesFirst) msg = `להקדים את תחילת הסדרה של „${name}” מ-${dmy(seriesFirst)} ל-${dmy(nd)}?\n\nייווספו ביומן הפגישות השבועיות שבין שני התאריכים.`;
+        else {
+          const lost = series.filter(e => evTimes(e).s < nd), marked = lost.filter(e => attended(e) || paid(e) || receiptIssued(e));
+          msg = `לדחות את תחילת הסדרה של „${name}” מ-${dmy(seriesFirst)} ל-${dmy(nd)}?\n\n${lost.length} פגישות שלפני התאריך החדש יוסרו מהיומן.`;
+          if (marked.length) msg += `\n\nשימי לב: ב-${marked.length} מהן יש סימונים (התקיימה / תשלום / קבלה), והם יימחקו יחד איתן.`;
+        }
+        if (nd.getDay() !== seriesFirst.getDay()) msg += `\n\nהפגישות יעברו ליום ${DAYS[nd.getDay()]} בכל שבוע.`;
+        if (keepNo) msg += `\n\nמספור המפגשים יתחיל מהפגישה הראשונה החדשה (מפגש ${keepNo}).`;
+        if (rruleInfo(master.recurrence).count && !body.recurrence) msg += '\n\nהסדרה מוגבלת במספר פגישות, שייספרו מהתאריך החדש, ולכן גם תאריך הסיום שלה ישתנה.';
+        const ok = await choose('תחילת הסדרה', msg, [{ label: 'כן, לעדכן', value: true, cls: 'primary' }]);
+        if (!ok) { showForm({ ev, mode, master, purpose }); return; }
+      }
+    }
+    const btn = $('#fSave', sh);  // אחרי חלון אישור הטופס כבר סגור
+    if (btn) { btn.disabled = true; btn.textContent = 'שומר…'; } else busy(true);
     try {
       if (!editing && invite) Object.assign(body, attendeeFields(emails));
       if (!editing) {
@@ -1991,6 +2023,14 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
           const inst = await api('GET', `/calendars/${enc(calId)}/events/${enc(created.id)}/instances`, null, qs({ maxResults: 1 }));
           const first = (inst.items || [])[0];
           if (first) await G.setProps(calId, first.id, { ...props(first), session_no: String(firstNo) });
+        }
+      }
+      else if (mode === 'series' && newStart) {
+        await G.updateSeries(ev._calendar_id, ev.recurringEventId, body, tz, hasGuests(ev), newStart);
+        if (keepNo) {
+          const inst = await api('GET', `/calendars/${enc(ev._calendar_id)}/events/${enc(ev.recurringEventId)}/instances`, null, qs({ maxResults: 1 }));
+          const first = (inst.items || [])[0];
+          if (first) await G.setProps(ev._calendar_id, first.id, { ...props(first), session_no: String(keepNo) });
         }
       }
       else if (mode === 'series') await G.updateSeries(ev._calendar_id, ev.recurringEventId, body, tz, hasGuests(ev));
@@ -2005,7 +2045,8 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
         if (invite) toast(`נוספה פגישה: ${name} · נשלח זימון`);
       }
       changed();
-    } catch (err) { btn.disabled = false; btn.textContent = editing ? 'שמירה' : 'הוספה'; handleErr(err); }
+    } catch (err) { if (btn) { btn.disabled = false; btn.textContent = editing ? 'שמירה' : 'הוספה'; } handleErr(err); }
+    finally { if (!btn) busy(false); }
   };
 }
 
