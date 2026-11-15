@@ -43,6 +43,11 @@ h1 { font-size: 19px; margin: 0; color: var(--brand-d); font-weight: 700; }
 #banner { background: #FFF4E5; color: #5A3B00; border-bottom: 1px solid #F3D9A6; padding: 10px 14px;
   display: flex; gap: 10px; align-items: center; }
 #banner[hidden] { display: none; }
+#quickBar { display: flex; gap: 6px; padding: 6px 10px; overflow-x: auto; background: var(--surface); border-bottom: 1px solid var(--line2); }
+#quickBar[hidden] { display: none; }
+.qchip { flex: none; border: 1px solid var(--line2); background: var(--surface); border-radius: 16px; padding: 5px 12px;
+  font: inherit; font-size: 13px; color: var(--brand-d); }
+.qchip.warn { background: #FFF4E5; border-color: #F3D9A6; color: #7A4B00; font-weight: 600; }
 main { flex: 1; overflow: auto; position: relative; padding-bottom: 90px; }
 
 /* bottom tabs */
@@ -191,7 +196,7 @@ select, input[type=text], input[type=email], input[type=url], input[type=number]
 .menu-item { display: flex; align-items: center; gap: 10px; padding: 13px 4px; border-bottom: 1px solid var(--line); font-size: 16px; }
 
 @media print {
-  header.top, nav.tabs, #fab, .no-print, #banner, #toast { display: none !important; }
+  header.top, nav.tabs, #fab, .no-print, #banner, #quickBar, #toast { display: none !important; }
   html, body, main { background: #fff; overflow: visible; height: auto; }
   #app { display: block; }
   .client { break-inside: avoid; border-color: #ccc; }
@@ -231,6 +236,7 @@ select, input[type=text], input[type=email], input[type=url], input[type=number]
     </div>
   </header>
   <div id="banner" hidden></div>
+  <div id="quickBar" hidden></div>
   <main id="main"></main>
   <button id="fab" aria-label="פגישה חדשה" hidden>+</button>
   <nav class="tabs" id="tabs">
