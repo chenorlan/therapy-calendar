@@ -2192,6 +2192,7 @@ function showMenu() {
     <div class="menu-item"><label class="check" style="flex:1"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label><button class="btn" id="mHolRefresh">רענון</button></div>
     <div class="menu-item"><span style="flex:1">Morning – קבלות ${morningReady() ? '✓' : ''}</span><button class="btn" id="mMorning">הגדרה</button></div>
     <div class="menu-item"><span style="flex:1">הוספת הוצאה ל-Morning</span><button class="btn primary" id="mExpense">📤 העלאה</button></div>
+    <div class="menu-item"><span style="flex:1">שיתוף מוואטסאפ / מייל לאפליקציה</span><span class="note">${'serviceWorker' in navigator && navigator.serviceWorker.controller ? '✓ מוכן' : '⏳ עוד לא מוכן – סוגרים ופותחים את האפליקציה'}</span></div>
     <h3 style="margin:18px 0 4px">צילומי תשלום</h3>
     <div class="menu-item"><span style="flex:1">מפתח Gemini: ${store.get('geminiKey', '') ? '✓ מוגדר' : 'לא מוגדר'}</span><button class="btn" id="gKeyBtn">${store.get('geminiKey', '') ? 'החלפה' : 'הגדרה'}</button></div>
     <h3 style="margin:18px 0 4px">חשבון</h3>
@@ -2327,7 +2328,9 @@ function init() {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); } });
   setInterval(() => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); } }, 5 * 60 * 1000);
   setInterval(() => { if (S.view === 'day' || S.view === 'week') { const nl = $('.nowline'); if (nl) { renderView.keepScroll = true; renderView(); } } }, 60 * 1000);
-  if ('serviceWorker' in navigator && !DEMO && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && !DEMO && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
+  }
   render();
 }
 init();
