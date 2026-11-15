@@ -1,4 +1,4 @@
-const APP_VERSION = '35';
+const APP_VERSION = '38';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -15,7 +15,8 @@ const RCPT_KEYS = ['rcpt_issued', 'rcpt_no', 'rcpt_date', 'rcpt_doc', 'rcpt_url'
 const APP_KEYS = ['attended', ...PAY_KEYS, ...CANCEL_KEYS, ...RCPT_KEYS, 'price', 'session_no'];  // זהה ל-Windows
 const CANCEL_REASONS = [['client', 'ביטול של המטופל/ת'], ['sick', 'מחלה'], ['me', 'ביטול שלי'], ['holiday', 'חג / חופשה'], ['noshow', 'לא הגיע/ה בלי הודעה'], ['other', 'אחר']];
 const APP_FOLDER = 'יומן הטיפולים', BACKUPS_FOLDER = 'גיבויים', SETTINGS_FILE = 'הגדרות.json', BACKUP_KEEP = 30;
-const DEFAULT_MORNING = { env: 'sandbox', item: 'טיפול בקלינאות תקשורת', template: 'עבור {מספר_טיפולים} טיפולים בתאריכים: {תאריכים}', vat_included: true, send_email: true };
+const OLD_MORNING_ITEM = 'טיפול בקלינאות תקשורת';
+const DEFAULT_MORNING = { env: 'sandbox', item: 'טיפולי שפה ודיבור בחודש {חודש}', template: 'עבור {מספר_טיפולים} טיפולים בתאריכים: {תאריכים}', vat_included: true, send_email: true };
 const DEFAULT_SETTINGS = { version: 1, default_price: 0, clients: {}, backup_email: true, holidays: true, morning: { ...DEFAULT_MORNING } };
 // ---- חגי ישראל (לוח ישראלי, שמות בעברית) מ-hebcal.com – זהה ל-Windows
 const HOL = {};  // 'YYYY-MM-DD' → [[שם, 'yomtov'|'other']]
@@ -153,7 +154,21 @@ const MORNING_URLS = { production: 'https://api.greeninvoice.co.il/api/v1', sand
 const MORNING_AUTH = { production: 'https://api.morning.co/idp/v1/oauth/token', sandbox: 'https://api.sandbox.morning.dev/idp/v1/oauth/token' };
 const MORNING_UPLOAD_URL = 'https://apigw.greeninvoice.co.il/file-upload/v1/url';
 const MORNING_PAY = { cash: 1, bank: 4, bit: 10, paybox: 10, other: 11 };
-const morningCfg = () => ({ ...DEFAULT_MORNING, ...(S.settings.morning || {}) });
+const morningCfg = () => { const m = { ...DEFAULT_MORNING, ...(S.settings.morning || {}) }; if (m.item === OLD_MORNING_ITEM) m.item = DEFAULT_MORNING.item; return m; };
+function monthsText(ss) {
+  // החודשים של הטיפולים, למשל „נובמבר 2026” או „אוקטובר ונובמבר 2026” – זהה ל-Windows
+  const ms = [...new Set(ss.map(e => { const s = evTimes(e).s; return s.getFullYear() * 100 + s.getMonth(); }))].sort();
+  if (!ms.length) return '';
+  const years = new Set(ms.map(x => Math.floor(x / 100)));
+  if (years.size === 1) { const n = ms.map(x => MONTHS[x % 100]); return (n.length === 1 ? n[0] : n.slice(0, -1).join(', ') + ' ו' + n[n.length - 1]) + ' ' + Math.floor(ms[0] / 100); }
+  return ms.map(x => MONTHS[x % 100] + ' ' + Math.floor(x / 100)).join(', ');
+}
+function renderItem(item, ss) {
+  item = (item || '').trim() || DEFAULT_MORNING.item;
+  if (item === OLD_MORNING_ITEM) item = DEFAULT_MORNING.item;
+  if (new Set(ss.map(e => { const d = evTimes(e).s; return d.getFullYear() * 100 + d.getMonth(); })).size > 1) item = item.split('בחודש {חודש}').join('בחודשים {חודש}');
+  return item.split('{חודש}').join(monthsText(ss)).trim();
+}
 const morningKeys = env => (store.get('morningKeys', {}) || {})[env] || {};
 const morningReady = () => { const k = morningKeys(morningCfg().env); return !!(k.id && k.secret); };
 const morningRelay = () => (store.get('morningRelay', '') || '').trim();
@@ -262,6 +277,40 @@ function showExpenses(initial = []) {
     $('#exStatus', sh).textContent = `✓ הועלו ${done.length} מסמכים ל-Morning. הם יופיעו שם תחת „הוצאות” כטיוטות לבדיקה (לפעמים אחרי דקה).` + (failed.length ? '\n\n⚠ לא הועלו:\n' + failed.join('\n') : '');
   };
 }
+async function morningSearchClients(env, name) {
+  // אנשי קשר שמורים ב-Morning שהשם שלהם מתאים – זהה ל-Windows
+  if (DEMO) { await new Promise(r => setTimeout(r, 200)); return name.includes(' ') ? [{ id: 'C1', name, emails: ['parent@example.com'] }] : []; }
+  const res = await morningCall(env, 'POST', '/clients/search', { name: (name || '').trim(), active: true, page: 1, pageSize: 25 }, await morningToken(env));
+  const items = Array.isArray(res) ? res : (res.items || []);
+  return items.filter(c => c.id).map(c => ({ id: c.id, name: c.name || '', emails: (c.emails || []).filter(Boolean) }));
+}
+function pickMorningContact(contacts, ...names) {
+  // לפי סדר השמות: קודם שם המטופל/ת (הילד/ה – להורה יכולים להיות כמה ילדים), ואז שם המשלם – זהה ל-Windows
+  const ns = names.filter(Boolean);
+  for (const n of ns) {
+    const exact = contacts.filter(c => normName(c.name) === normName(n));
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return null;
+  }
+  return contacts.length === 1 && ns.length === 1 ? contacts[0] : null;
+}
+async function findMorningContact(env, client, payer = '') {
+  // קודם לפי שם המטופל/ת, ורק אם לא נמצא – לפי שם המשלם
+  const found = client ? await morningSearchClients(env, client) : [];
+  const c = pickMorningContact(found, client);
+  if (c || !payer || normName(payer) === normName(client)) return [c, found];
+  const more = await morningSearchClients(env, payer), ids = new Set(found.map(f => f.id));
+  return [pickMorningContact(more, payer), found.concat(more.filter(x => !ids.has(x.id)))];
+}
+async function linkMorningContact(name, contact) {
+  // זוכרים איזה איש קשר ב-Morning שייך למטופל/ת (במחשב ובטלפון)
+  name = (name || '').trim(); if (!name) return;
+  if (((clientInfo(name).morning_client) || {}).id === (contact || {}).id) return;
+  const st = JSON.parse(JSON.stringify(S.settings)); st.clients = st.clients || {};
+  const info = st.clients[name] = st.clients[name] || {};
+  if (contact) info.morning_client = { id: contact.id, name: contact.name || '', emails: contact.emails || [] }; else delete info.morning_client;
+  await saveSettings(st);
+}
 async function morningCreate(env, body) {
   if (DEMO) { await new Promise(r => setTimeout(r, 400)); return { id: 'demodoc', number: 10045, url: { he: '#' } }; }
   return morningCall(env, 'POST', '/documents', body, await morningToken(env));
@@ -270,12 +319,13 @@ const sessionAmount = ev => payAmount(ev) || evPrice(ev);
 const receiptDatesText = ss => ss.map(e => evTimes(e).s).sort((a, b) => a - b).map(dmy).join(', ');
 const renderReceiptText = (tpl, ss, name) => tpl.replace('{תאריכים}', receiptDatesText(ss)).replace('{מספר_טיפולים}', String(ss.length))
   .replace('{שם_מטופל}', name).replace('{סכום}', fmtMoney(ss.reduce((a, e) => a + (sessionAmount(e) || 0), 0)));
-function morningDocument(ss, { name, emails, send, item, remarks, date, vatIncluded }) {
+function morningDocument(ss, { name, emails, send, item, remarks, date, vatIncluded, clientId = null }) {
+  item = renderItem(item, ss);
   const byPrice = {}, pays = {};
   for (const e of ss) { const a = Math.round(sessionAmount(e) * 100) / 100; byPrice[a] = (byPrice[a] || 0) + 1; }
   for (const e of ss) { const p = props(e), k = (p.pay_method || 'other') + '|' + (p.pay_date || date); pays[k] = Math.round(((pays[k] || 0) + sessionAmount(e)) * 100) / 100; }
   return { type: 320, date, lang: 'he', currency: 'ILS', vatType: 0, rounding: false, signed: true, attachment: !!(send && emails.length),
-    client: { name, emails, add: false },
+    client: clientId ? { id: clientId, name, emails } : { name, emails, add: false },
     income: Object.entries(byPrice).sort((a, b) => a[0] - b[0]).map(([price, n]) => ({ description: item, quantity: n, price: Number(price), currency: 'ILS', vatType: vatIncluded ? 1 : 0 })),
     payment: Object.entries(pays).sort((a, b) => a[0].split('|')[1].localeCompare(b[0].split('|')[1])).map(([k, price]) => { const [m, d] = k.split('|'); return { type: MORNING_PAY[m] || 11, price, currency: 'ILS', date: d }; }),
     remarks };
@@ -2333,7 +2383,7 @@ function showBulkReceipts(monthIdx = null) {
   const groups = paidWithoutReceipt();
   const rows = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'he')).map(name => {
     const ss = groups[name].filter(e => { const s = evTimes(e).s; return s.getFullYear() === month.getFullYear() && s.getMonth() === month.getMonth(); }).sort((a, b) => evTimes(a).s - evTimes(b).s);
-    return { name, ss, missing: ss.some(e => !sessionAmount(e)), payer: (ss.map(e => props(e).pay_payer).find(Boolean)) || name };
+    return { name, ss, missing: ss.some(e => !sessionAmount(e)), payer: name, realPayer: (ss.map(e => props(e).pay_payer).find(Boolean)) || '' };
   }).filter(r => r.ss.length);
   const sh = openSheet(`<h3 style="margin:4px 0 6px">🧾 קבלות לסוף החודש</h3>
     <div class="field"><label>חודש הטיפולים</label><select id="brMonth">${months.map((x, i) => `<option value="${i}" ${i === mi ? 'selected' : ''}>${MONTHS[x.getMonth()]} ${x.getFullYear()}</option>`).join('')}</select></div>
@@ -2357,11 +2407,14 @@ function showBulkReceipts(monthIdx = null) {
     try {
       for (const j of jobs) {
         try {
-          const emails = clientEmails(j.name);
-          const body = morningDocument(j.ss, { name: j.payer, emails, send: send && emails.length > 0, item: m.item, remarks: renderReceiptText(m.template || '', j.ss, j.name), date, vatIncluded: m.vat_included });
+          let contact = clientInfo(j.name).morning_client || null;
+          if (!contact) { try { contact = (await findMorningContact(m.env, j.payer || j.name, j.realPayer))[0]; } catch { contact = null; } }
+          const emails = (contact && contact.emails && contact.emails.length) ? contact.emails : clientEmails(j.name);
+          const body = morningDocument(j.ss, { name: (contact && contact.name) || j.payer, emails, send: send && emails.length > 0, item: m.item, remarks: renderReceiptText(m.template || '', j.ss, j.name), date, vatIncluded: m.vat_included, clientId: contact ? contact.id : null });
           const res = await morningCreate(m.env, body), url = res.url || {};
           const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: j.ss.length > 1 ? String(j.ss.length) : '' };
           for (const e of j.ss) await setStatus(e, ch);
+          if (contact) await linkMorningContact(j.name, contact);
           ok++;
         } catch (e) { errors.push(`${j.name}: ${e.message}`); }
       }
@@ -2808,7 +2861,7 @@ function showMorningSettings(then) {
       <p class="note">Morning חוסמים חיבור ישיר מהטלפון, ולכן הבקשות עוברות דרך ממסר קטן ב-Google Apps Script בחשבון שלך (לפי המדריך).</p></div>
     <div class="field"><label>מזהה מפתח (ID)</label><input type="text" dir="ltr" id="moId" autocomplete="off"></div>
     <div class="field"><label>מפתח סודי (Secret)</label><input type="text" dir="ltr" id="moSecret" autocomplete="off" style="-webkit-text-security:disc"><button class="btn" id="moShow" type="button" style="margin-top:6px">הצגה</button></div>
-    <div class="field"><label>תיאור השירות</label><input type="text" id="moItem" value="${esc(m.item)}"></div>
+    <div class="field"><label>תיאור השירות</label><input type="text" id="moItem" value="${esc(m.item)}"><p class="note">{חודש} = החודש של הטיפולים (למשל „נובמבר 2026”).</p></div>
     <div class="field"><label>טקסט קבוע על הקבלה</label><textarea id="moTpl" rows="3">${esc(m.template)}</textarea>
       <p class="note">אפשר להשתמש ב: {תאריכים} {מספר_טיפולים} {שם_מטופל} {סכום}</p></div>
     <label class="check"><input type="checkbox" id="moVat" ${m.vat_included ? 'checked' : ''}>המחירים כוללים מע״מ</label>
@@ -2847,6 +2900,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
     ${m.env === 'sandbox' ? '<p class="note" style="background:#FFF1D6;color:#7A4B00;padding:6px 8px;border-radius:8px">סביבת בדיקות: המסמך לא יהיה אמיתי. (אפשר לעבור לפעיל בתפריט ☰ ← Morning)</p>' : ''}
     <div class="field"><label>מטופל/ת</label><select id="miClient">${names.map(n => `<option ${n === name ? 'selected' : ''} value="${esc(n)}">${esc(n)} (${groups[n].length} טיפולים בלי קבלה)</option>`).join('')}</select></div>
     <div class="sec">הטיפולים שייכללו בקבלה (אפשר כמה – קבלה אחת על כולם):</div><div id="miList"></div>
+    <div class="field"><label>איש קשר ב-Morning</label><div class="two"><select id="miContact" style="flex:3"></select><button class="btn" id="miFind" style="flex:1">🔎 חיפוש</button></div><p class="note" id="miCInfo" style="margin:4px 0 0"></p></div>
     <div class="field"><label>שם על הקבלה</label><input type="text" id="miName"></div>
     <div class="field"><label class="check"><input type="checkbox" id="miSend" ${m.send_email ? 'checked' : ''}>לשלוח את הקבלה במייל ל:</label><input type="email" dir="ltr" id="miEmails"></div>
     <div class="field"><label>תיאור השירות</label><input type="text" id="miItem" value="${esc(m.item)}"></div>
@@ -2854,21 +2908,53 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
     <div class="field"><label>תאריך המסמך</label><input type="date" id="miDate" value="${isoDate(today())}"></div>
     <p class="totals" id="miSum" style="padding:0"></p><p class="err" id="miErr"></p>
     <div class="actions"><button class="btn primary" id="miGo">הפקה ב-Morning</button><button class="btn" id="miCancel">ביטול</button></div>`);
-  let touched = false;
+  let touched = false, itemTouched = false;
   $('#miRemarks', sh).oninput = () => { touched = true; };
+  $('#miItem', sh).oninput = () => { itemTouched = true; };
   const chosen = () => [...sh.querySelectorAll('[data-mi]:checked')].map(i => groups[name][Number(i.dataset.mi)]);
   const upd = () => {
     const ss = chosen(), total = ss.reduce((a, e) => a + (sessionAmount(e) || 0), 0), by = {};
     for (const e of ss) by[payLabel(e) || 'לא צוין'] = (by[payLabel(e) || 'לא צוין'] || 0) + (sessionAmount(e) || 0);
     if (!touched) $('#miRemarks', sh).value = ss.length ? renderReceiptText(m.template, ss, name) : '';
+    if (!itemTouched) $('#miItem', sh).value = renderItem(m.item, ss);
     $('#miSum', sh).textContent = ss.length ? `${ss.length} טיפולים · סה״כ ${fmtMoney(total)} · תשלום: ${Object.entries(by).map(([k, v]) => k + ' ' + fmtMoney(v)).join(', ')}` : 'לא נבחרו טיפולים.';
   };
+  let contacts = {};
+  const setContacts = (list, selId) => {
+    contacts = Object.fromEntries(list.map(c => [c.id, c]));
+    $('#miContact', sh).innerHTML = '<option value="">בלי – פרטים חד-פעמיים על הקבלה</option>' + list.map(c => `<option value="${esc(c.id)}" ${c.id === selId ? 'selected' : ''}>${esc(c.name)}${c.emails.length ? ' (' + esc(c.emails.join(', ')) + ')' : ''}</option>`).join('');
+    if (selId) contactChosen();
+  };
+  const contactChosen = () => {
+    const c = contacts[$('#miContact', sh).value]; if (!c) return;
+    $('#miName', sh).value = c.name; if (c.emails.length) $('#miEmails', sh).value = c.emails.join(', ');
+    $('#miCInfo', sh).textContent = 'הקבלה תירשם על איש הקשר הזה ב-Morning (לא ייווצר איש קשר חדש).' + (c.emails.length ? ' המייל שלו נלקח מ-Morning.' : '');
+  };
+  const search = async (text, auto = false, payer = '') => {
+    text = (text || '').trim(); if (!text) return;
+    const forName = name; $('#miCInfo', sh).textContent = 'מחפש אנשי קשר ב-Morning…';
+    try {
+      const [best, found] = auto ? await findMorningContact(m.env, text, payer) : [null, await morningSearchClients(m.env, text)];
+      if (forName !== name || !$('#miContact', sh)) return;
+      const keep = $('#miContact', sh).value, merged = Object.values(contacts).concat(found.filter(c => !contacts[c.id]));
+      const pick = keep || (auto ? (best || {}).id : null);
+      setContacts(merged, pick);
+      $('#miCInfo', sh).textContent = (found.length ? `נמצאו ${found.length} אנשי קשר. ` : 'לא נמצא איש קשר בשם הזה ב-Morning. ') + (auto && pick && best && pick === best.id ? (normName(best.name) === normName(text) ? '✓ נבחר לפי שם המטופל/ת.' : `✓ נבחר לפי שם המשלם (לא נמצא איש קשר על שם ${text}).`) : 'אפשר לבחור מהרשימה.');
+    } catch (e) { $('#miCInfo', sh).textContent = 'החיפוש ב-Morning נכשל: ' + e.message; }
+  };
+  $('#miContact', sh).onchange = contactChosen;
+  $('#miFind', sh).onclick = () => search($('#miName', sh).value);
   const fill = () => {
     const ss = groups[name], sel = pre && name === title(ev || {}).trim() ? pre : new Set(ss.map(e => e.id));
     $('#miList', sh).innerHTML = ss.map((e, i) => `<label class="radio"><input type="checkbox" data-mi="${i}" ${sel.has(e.id) ? 'checked' : ''}>${sessionLine(e)}</label>`).join('');
     sh.querySelectorAll('[data-mi]').forEach(i => i.onchange = upd);
-    $('#miName', sh).value = (ss.map(e => props(e).pay_payer).find(Boolean)) || name;
+    const payer = (ss.map(e => props(e).pay_payer).find(Boolean)) || '';
+    $('#miName', sh).value = name || payer;  // שם הילד/ה הוא העיקר
     $('#miEmails', sh).value = clientEmails(name).join(', ');
+    setContacts([], null); $('#miCInfo', sh).textContent = '';
+    const linked = clientInfo(name).morning_client;
+    if (linked && linked.id) { setContacts([{ ...linked, emails: linked.emails || [] }], linked.id); $('#miCInfo', sh).textContent = '✓ מקושר לאיש הקשר הזה מקבלה קודמת.'; }
+    else search(name, true, payer);
     upd();
   };
   $('#miClient', sh).onchange = e => { name = e.target.value; touched = false; fill(); };
@@ -2883,17 +2969,19 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
     if (bad.length) return err(`המייל לא תקין: ${bad.join(', ')}`);
     const payer = $('#miName', sh).value.trim(); if (!payer) return err('יש למלא שם על הקבלה.');
     const total = ss.reduce((a, e) => a + sessionAmount(e), 0), date = $('#miDate', sh).value;
-    const remarks = $('#miRemarks', sh).value.trim(), item = $('#miItem', sh).value.trim() || m.item, send = $('#miSend', sh).checked;
+    const remarks = $('#miRemarks', sh).value.trim(), item = $('#miItem', sh).value.trim() || m.item, send = $('#miSend', sh).checked, cid = $('#miContact', sh).value;
     const real = m.env === 'production';
     const ok = await choose('הפקת קבלה', `להפיק חשבונית מס/קבלה על ${ss.length} טיפולים, סה״כ ${fmtMoney(total)}, על שם „${payer}”?` + (real ? '\n\nזה מסמך רשמי: אחרי ההפקה אי אפשר למחוק אותו, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }]);
     if (!ok) { showMorningIssue({ ev, client: name, extra }); return; }
     busy(true);
     try {
-      const body = morningDocument(ss, { name: payer, emails, send, item, remarks, date, vatIncluded: m.vat_included });
+      const contact = contacts[cid] || null;
+      const body = morningDocument(ss, { name: payer, emails, send, item, remarks, date, vatIncluded: m.vat_included, clientId: contact ? contact.id : null });
       const res = await morningCreate(m.env, body);
       const url = res.url || {};
       const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: ss.length > 1 ? String(ss.length) : '' };
       for (const e of ss) setStatus(e, ch);
+      linkMorningContact(name, contact);
       alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.`);
     } catch (e) { alertSheet('ההפקה נכשלה', e.message); }
     finally { busy(false); }
