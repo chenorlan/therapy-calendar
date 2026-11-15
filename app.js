@@ -1,4 +1,4 @@
-const APP_VERSION = '22 (ממסר Morning)';
+const APP_VERSION = '23';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -189,9 +189,9 @@ async function morningToken(env) {
   let j;
   try { j = await morningCall(env, 'POST', '/account/token', { id: k.id, secret: k.secret }); }
   catch (e) {
-    if (/\((400|401|404)\)/.test(e.message)) throw new Error(env === 'sandbox'
+    if (/\((400|401|404)\)/.test(e.message)) throw new Error((env === 'sandbox'
       ? 'המפתח לא נמצא בסביבת הבדיקות. מפתח מהחשבון הרגיל ב-Morning עובד רק בסביבה „פעיל”. לסביבת בדיקות צריך חשבון בדיקות נפרד (app.sandbox.d.greeninvoice.co.il) ומפתח משם.'
-      : 'Morning לא זיהו את המפתח. בודקים שמזהה המפתח והמפתח הסודי הועתקו במלואם, ושהמפתח פעיל.');
+      : 'Morning לא זיהו את המפתח. בודקים שמזהה המפתח והמפתח הסודי הועתקו במלואם, ושהמפתח פעיל.') + '\nתשובת Morning: ' + e.message.replace(/^[^:]*:\s*/, ''));
     throw e;
   }
   if (!j.token) throw new Error('Morning לא החזירו אישור התחברות. בודקים את מזהה המפתח והסוד.');
@@ -1540,19 +1540,20 @@ function showMorningSettings(then) {
     <div class="field"><label>כתובת ממסר (נדרש בטלפון)</label><input type="url" dir="ltr" id="moRelay" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(morningRelay())}">
       <p class="note">Morning חוסמים חיבור ישיר מהטלפון, ולכן הבקשות עוברות דרך ממסר קטן ב-Google Apps Script בחשבון שלך (לפי המדריך).</p></div>
     <div class="field"><label>מזהה מפתח (ID)</label><input type="text" dir="ltr" id="moId" autocomplete="off"></div>
-    <div class="field"><label>מפתח סודי (Secret)</label><input type="text" dir="ltr" id="moSecret" autocomplete="off" style="-webkit-text-security:disc"></div>
+    <div class="field"><label>מפתח סודי (Secret)</label><input type="text" dir="ltr" id="moSecret" autocomplete="off" style="-webkit-text-security:disc"><button class="btn" id="moShow" type="button" style="margin-top:6px">הצגה</button></div>
     <div class="field"><label>תיאור השירות</label><input type="text" id="moItem" value="${esc(m.item)}"></div>
     <div class="field"><label>טקסט קבוע על הקבלה</label><textarea id="moTpl" rows="3">${esc(m.template)}</textarea>
       <p class="note">אפשר להשתמש ב: {תאריכים} {מספר_טיפולים} {שם_מטופל} {סכום}</p></div>
     <label class="check"><input type="checkbox" id="moVat" ${m.vat_included ? 'checked' : ''}>המחירים כוללים מע״מ</label>
     <label class="check"><input type="checkbox" id="moSend" ${m.send_email ? 'checked' : ''}>לשלוח את הקבלה למייל של המטופל/ת או ההורה</label>
-    <div class="actions"><button class="btn" id="moTest">בדיקת חיבור</button></div><p class="note" id="moRes"></p>
+    <div class="actions"><button class="btn" id="moTest">בדיקת חיבור</button></div><p class="note" id="moRes" style="white-space:pre-line"></p>
     <div class="actions"><button class="btn primary" id="moSave">שמירה</button><button class="btn" id="moCancel">ביטול</button></div>`);
   const k = { ...keys };
   let env = m.env;
   const load = () => { $('#moId', sh).value = (k[env] || {}).id || ''; $('#moSecret', sh).value = (k[env] || {}).secret || ''; };
   const keep = () => { k[env] = { id: $('#moId', sh).value.trim(), secret: $('#moSecret', sh).value.trim() }; };
   load();
+  $('#moShow', sh).onclick = () => { const i = $('#moSecret', sh), hid = i.style.webkitTextSecurity !== 'none'; i.style.webkitTextSecurity = hid ? 'none' : 'disc'; $('#moShow', sh).textContent = hid ? 'הסתרה' : 'הצגה'; };
   $('#moEnv', sh).onchange = e => { keep(); env = e.target.value; load(); $('#moRes', sh).textContent = ''; };
   $('#moTest', sh).onclick = async () => {
     keep(); store.set('morningKeys', k); store.set('morningRelay', $('#moRelay', sh).value.trim()); $('#moRes', sh).textContent = 'בודק…';
