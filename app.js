@@ -1,4 +1,4 @@
-const APP_VERSION = '32';
+const APP_VERSION = '35';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -896,8 +896,16 @@ function visibleRange() {
   if (S.view === 'day') return [a, addDays(a, 1)];
   if (S.view === 'week' || S.view === 'list') { const ws = weekStart(a); return [ws, addDays(ws, 7)]; }
   if (S.view === 'month') { const days = monthDays(); return [days[0], addDays(days[days.length - 1], 1)]; }
+  if (sumWeekly()) { const ws = weekStart(a); return [ws, addDays(ws, 7)]; }
   const first = new Date(a.getFullYear(), a.getMonth(), 1);
   return [first, new Date(a.getFullYear(), a.getMonth() + 1, 1)];
+}
+// סיכום שבועי או חודשי (זהה ל-Windows)
+const sumWeekly = () => S.view === 'summary' && store.get('sumPeriod', 'month') === 'week';
+function sumPeriodName() {
+  if (!sumWeekly()) return `${MONTHS[S.anchor.getMonth()]} ${S.anchor.getFullYear()}`;
+  const ws = weekStart(S.anchor), we = addDays(ws, 6);
+  return `שבוע ${dmy(ws).slice(0, 5)}–${dmy(we)}`;
 }
 function monthDays() {
   const first = new Date(S.anchor.getFullYear(), S.anchor.getMonth(), 1);
@@ -1102,7 +1110,7 @@ function updatePeriod() {
     const ws = weekStart(a), we = addDays(ws, 6);
     t = ws.getMonth() === we.getMonth() ? `${ltr(ws.getDate() + '–' + we.getDate())} ב${MONTHS[ws.getMonth()]} ${ws.getFullYear()}`
       : `${ws.getDate()} ב${MONTHS[ws.getMonth()]} – ${we.getDate()} ב${MONTHS[we.getMonth()]}`;
-  } else t = `${MONTHS[a.getMonth()]} ${a.getFullYear()}`;
+  } else t = S.view === 'summary' ? sumPeriodName() : `${MONTHS[a.getMonth()]} ${a.getFullYear()}`;
   $('#period').textContent = '\u200f' + t;
 }
 
@@ -1237,7 +1245,7 @@ function listHtml() {
   return h || '<div class="empty">אין פגישות בשבוע הזה.</div>';
 }
 
-// ---- סיכום חודשי
+// ---- סיכום שבועי / חודשי
 const attText = ev => attended(ev) === 'no' ? 'לא התקיימה' + (cancelLabel(ev) ? ` (${cancelLabel(ev)})` : '') : (attended(ev) === 'yes' ? 'התקיימה' : 'טרם סומן');
 const payText = ev => paid(ev) ? 'שולם' : (attended(ev) === 'yes' ? 'לא שולם' : '—');
 function stats(evs) {
@@ -1268,8 +1276,9 @@ function summaryHtml() {
   const st = stats(all);
   const methods = {};
   all.filter(paid).forEach(e => { const l = payLabel(e) || 'לא צוין'; methods[l] = (methods[l] || 0) + 1; });
-  let h = `<div class="print-title">סיכום טיפולים ותשלומים – ${MONTHS[S.anchor.getMonth()]} ${S.anchor.getFullYear()}${S.sumClient ? ' – ' + esc(S.sumClient) : ''}</div>
+  let h = `<div class="print-title">סיכום טיפולים ותשלומים – ${sumPeriodName()}${S.sumClient ? ' – ' + esc(S.sumClient) : ''}</div>
     <div class="sum-controls no-print">
+      <select id="sumPeriod" style="flex:none;width:auto"><option value="month" ${sumWeekly() ? '' : 'selected'}>חודשי</option><option value="week" ${sumWeekly() ? 'selected' : ''}>שבועי</option></select>
       <select id="sumClient"><option value="">כל המטופלים</option>${names.map(n => `<option ${n === S.sumClient ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>
       <select id="sumFilter">
         <option value="all" ${S.sumFilter === 'all' ? 'selected' : ''}>כל הפגישות</option>
@@ -1311,7 +1320,7 @@ async function exportCsv() {
       evPrice(ev) ? String(evPrice(ev)) : '', attended(ev) === 'no' ? cancelLabel(ev) : '', receiptIssued(ev) ? 'הוצאה' : '', p.rcpt_no || '', sessionNo(ev) ? String(sessionNo(ev)) : '']);
   }
   const csv = '\ufeff' + rows.map(r => r.map(c => /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c).join(',')).join('\r\n');
-  const fname = `סיכום ${MONTHS[S.anchor.getMonth()]} ${S.anchor.getFullYear()}${S.sumClient ? ' - ' + S.sumClient : ''}.csv`;
+  const fname = `סיכום ${sumPeriodName().replace(/\//g, '.')}${S.sumClient ? ' - ' + S.sumClient : ''}.csv`;
   const file = new File([csv], fname, { type: 'text/csv' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file], title: fname }); return; } catch (e) { if (e.name === 'AbortError') return; }
@@ -1338,6 +1347,7 @@ function bindView() {
   main.querySelectorAll('.tg-head [data-day]').forEach(el => el.addEventListener('click', () => { if (S.view === 'week') goDay(parseDateOnly(el.dataset.day)); }));
   main.querySelectorAll('.mo-cell').forEach(el => el.addEventListener('click', () => goDay(parseDateOnly(el.dataset.day))));
   const sc = $('#sumClient'); if (sc) sc.onchange = () => { S.sumClient = sc.value; renderView(); };
+  const sp = $('#sumPeriod'); if (sp) sp.onchange = () => { store.set('sumPeriod', sp.value); if (sp.value === 'week' && S.anchor.getMonth() !== today().getMonth()) S.anchor = new Date(S.anchor.getFullYear(), S.anchor.getMonth(), 1); S.loaded = false; renderView(); loadEvents(); };
   const sf = $('#sumFilter'); if (sf) sf.onchange = () => { S.sumFilter = sf.value; renderView(); };
   const cb = $('#csvBtn'); if (cb) cb.onclick = exportCsv;
   const mb = $('#morningBtn'); if (mb) mb.onclick = () => showMorningIssue({ client: S.sumClient || null, extra: S.events });
@@ -1348,7 +1358,7 @@ function setView(v) { S.view = v; store.set('view', v); S.loaded = false; render
 function step(dir) {
   const a = S.anchor;
   if (S.view === 'day') S.anchor = addDays(a, dir);
-  else if (S.view === 'week' || S.view === 'list') S.anchor = addDays(a, 7 * dir);
+  else if (S.view === 'week' || S.view === 'list' || sumWeekly()) S.anchor = addDays(a, 7 * dir);
   else S.anchor = new Date(a.getFullYear(), a.getMonth() + dir, 1);
   S.loaded = false; renderView(); loadEvents();
 }
@@ -1394,10 +1404,24 @@ function uniqueSessions(evs) {
   for (const e of evs) { if (seen.has(e.id) || !isSession(e) || evTimes(e).allDay) continue; seen.add(e.id); out.push(e); }
   return out;
 }
-function computeDebts(evs, includeUnmarked = true) {
+const DEBT_RANGES = [['all', 'כל התקופה'], ['this_month', 'החודש'], ['last_month', 'החודש הקודם'], ['month', 'חודש מסוים'], ['3months', '3 החודשים האחרונים'], ['year', 'השנה'], ['custom', 'מתאריך עד תאריך']];
+function debtRange(key, month = null, from = '', to = '') {
+  // טווח תאריכים לסינון „מי חייב לי” (תאריכי ISO, כולל) – זהה ל-Windows
+  const t = today(), first = new Date(t.getFullYear(), t.getMonth(), 1);
+  if (key === 'this_month') return [isoDate(first), isoDate(t)];
+  if (key === 'last_month') return [isoDate(new Date(t.getFullYear(), t.getMonth() - 1, 1)), isoDate(addDays(first, -1))];
+  if (key === 'month' && month) { const m = parseDateOnly(month); return [isoDate(m), isoDate(addDays(new Date(m.getFullYear(), m.getMonth() + 1, 1), -1))]; }
+  if (key === '3months') return [isoDate(new Date(t.getFullYear(), t.getMonth() - 2, 1)), isoDate(t)];
+  if (key === 'year') return [isoDate(new Date(t.getFullYear(), 0, 1)), isoDate(t)];
+  if (key === 'custom') return [from || null, to || null];
+  return [null, null];
+}
+function computeDebts(evs, includeUnmarked = true, since = null, until = null) {
   const now = new Date(), groups = {};
   for (const e of uniqueSessions(evs)) {
     if (!canEdit(e) || paid(e) || attended(e) === 'no' || evTimes(e).s >= now) continue;
+    const d = isoDate(evTimes(e).s);
+    if ((since && d < since) || (until && d > until)) continue;
     if (attended(e) !== 'yes' && !includeUnmarked) continue;
     (groups[title(e).trim()] = groups[title(e).trim()] || []).push(e);
   }
@@ -1610,20 +1634,40 @@ function renderQuickBar() {
 }
 
 // מי חייב לי + תזכורת תשלום
-function showDebts(include = true) {
-  const data = computeDebts(allKnown(), include), tot = data.reduce((t, d) => t + d.total, 0);
+function showDebts(include = true, f = null) {
+  f = f || store.get('debtFilter', { range: 'all', month: '', from: '', to: '' });
+  const months = []; for (let i = 0; i < 24; i++) months.push(new Date(today().getFullYear(), today().getMonth() - i, 1));
+  if (!f.month) f.month = isoDate(months[0]);
+  if (!f.from) f.from = isoDate(months[0]);
+  if (!f.to) f.to = isoDate(today());
+  const [since, until] = debtRange(f.range, f.month, f.from, f.to);
+  const data = computeDebts(allKnown(), include, since, until), tot = data.reduce((t, d) => t + d.total, 0);
+  const period = since ? ` (${dmy(parseDateOnly(since))}–${dmy(parseDateOnly(until || isoDate(today())))})` : '';
   const sh = openSheet(`<h3 style="margin:4px 0 6px">מי חייב לי</h3>
+    <div class="field"><label>תקופה</label><select id="dbRange">${DEBT_RANGES.map(([k, l]) => `<option value="${k}" ${k === f.range ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    ${f.range === 'month' ? `<div class="field"><select id="dbMonth">${months.map(m => `<option value="${isoDate(m)}" ${isoDate(m) === f.month ? 'selected' : ''}>${MONTHS[m.getMonth()]} ${m.getFullYear()}</option>`).join('')}</select></div>` : ''}
+    ${f.range === 'custom' ? `<div class="two"><div class="field"><label>מתאריך</label><input type="date" id="dbFrom" value="${f.from}"></div><div class="field"><label>עד</label><input type="date" id="dbTo" value="${f.to}"></div></div>` : ''}
     <label class="check"><input type="checkbox" id="dbInc" ${include ? 'checked' : ''}>כולל טיפולים שעברו ועוד לא סומן אם התקיימו</label>
     ${data.length ? data.map((d, i) => `<div class="card" style="margin:8px 0;padding:10px">
       <div style="display:flex;gap:8px;align-items:center"><b style="flex:1">${esc(d.name)}</b><b>${d.total ? fmtMoney(d.total) : '—'}</b></div>
       <div class="note">${d.sessions.length} טיפולים${d.unmarked ? ` · מהם ${d.unmarked} לא סומנו` : ''}: ${d.sessions.map(e => dmy(evTimes(e).s).slice(0, 5)).join(', ')}</div>
       <button class="btn" data-rem="${i}" style="margin-top:6px">📨 תזכורת תשלום</button></div>`).join('')
-      : '<p>אין חובות פתוחים 🎉</p>'}
-    ${data.length ? `<p><b>סה"כ: ${fmtMoney(tot)} · ${data.length} מטופלים</b></p>` : ''}
+      : `<p>אין חובות פתוחים${period} 🎉</p>`}
+    ${data.length ? `<p><b>סה"כ${period}: ${fmtMoney(tot)} · ${data.length} מטופלים</b></p><button class="btn primary" id="dbAll" style="width:100%">📨 תזכורת לכולם</button>` : ''}
     <p class="note">החישוב לפי השנתיים האחרונות. טיפול שלא התקיים לא נחשב חוב.</p>
     <div class="actions"><button class="btn" id="dbClose">סגירה</button></div>`);
-  $('#dbInc', sh).onchange = e => showDebts(e.target.checked);
+  const again = ch => { const nf = { ...f, ...ch }; store.set('debtFilter', nf); showDebts($('#dbInc', sh).checked, nf); };
+  $('#dbRange', sh).onchange = e => again({ range: e.target.value });
+  if ($('#dbMonth', sh)) $('#dbMonth', sh).onchange = e => again({ month: e.target.value });
+  if ($('#dbFrom', sh)) $('#dbFrom', sh).onchange = e => again({ from: e.target.value });
+  if ($('#dbTo', sh)) $('#dbTo', sh).onchange = e => again({ to: e.target.value });
+  $('#dbInc', sh).onchange = e => showDebts(e.target.checked, f);
   sh.querySelectorAll('[data-rem]').forEach(b => b.onclick = () => showPayReminder(data[+b.dataset.rem], include));
+  if ($('#dbAll', sh)) $('#dbAll', sh).onclick = () => {
+    const tpl = S.settings.pay_reminder || DEFAULT_PAY_REMINDER;
+    showNotify(data.map(d => [d.sessions[0], renderReceiptText(tpl, d.sessions, d.name)]),
+      `תזכורת תשלום ל-${data.length} מטופלים – לכל אחד הסכום והתאריכים שלו בתקופה שנבחרה (לחיצה על שם מציגה את ההודעה):`, 'תזכורת תשלום', () => showDebts(include, f));
+  };
   $('#dbClose', sh).onclick = closeSheet;
 }
 function showPayReminder(d, include) {
@@ -2170,16 +2214,17 @@ function showCancelDay(day = today()) {
     showNotify(chosen.map(ev => [ev, renderCancelMsg(tpl, ev)]));
   };
 }
-function showNotify(items) {
-  const sh = openSheet(`<h3 style="margin:4px 0 6px">הודעה להורים</h3><p>✓ הטיפולים סומנו כמבוטלים. עכשיו שולחים הודעה:</p>
-    ${items.map(([ev], i) => { const n = title(ev).trim(); return `<div class="menu-item"><span style="flex:1">${esc(n)}</span><button class="btn" data-nw="${i}">💬 וואטסאפ</button><button class="btn" data-nm="${i}" ${clientEmails(n).length ? '' : 'disabled'}>✉ מייל</button></div>`; }).join('')}
+function showNotify(items, intro = '✓ הטיפולים סומנו כמבוטלים. עכשיו שולחים הודעה:', subject = 'ביטול טיפול', onBack = null) {
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">הודעה להורים</h3><p>${esc(intro)}</p>
+    ${items.map(([ev, text], i) => { const n = title(ev).trim(); return `<div class="menu-item"><details style="flex:1"><summary>${esc(n)}</summary><div class="note" style="white-space:pre-wrap">${esc(text)}</div></details><button class="btn" data-nc="${i}">📋 העתקה</button><button class="btn" data-nw="${i}">💬 וואטסאפ</button><button class="btn" data-nm="${i}" ${clientEmails(n).length ? '' : 'disabled'}>✉ מייל</button></div>`; }).join('')}
     <div class="actions"><button class="btn" id="ntAll">✉ מייל לכל מי שיש לו מייל</button><button class="btn primary" id="ntDone">סיום</button></div>`);
   const mail = async (i, b) => { const [ev, text] = items[i], n = title(ev).trim(), em = clientEmails(n); if (!em.length) return;
-    try { await sendPlainEmail(em.join(', '), `ביטול טיפול – ${n}`, text); if (b) b.textContent = '✓ נשלח'; } catch (e) { handleErr(e); } };
+    try { await sendPlainEmail(em.join(', '), `${subject} – ${n}`, text); if (b) b.textContent = '✓ נשלח'; } catch (e) { handleErr(e); } };
   sh.querySelectorAll('[data-nw]').forEach(b => b.onclick = () => { const [ev, text] = items[+b.dataset.nw]; window.open(whatsappUrl(clientPhone(title(ev).trim()), text), '_blank'); b.textContent = '✓ נפתח'; });
   sh.querySelectorAll('[data-nm]').forEach(b => b.onclick = () => mail(+b.dataset.nm, b));
+  sh.querySelectorAll('[data-nc]').forEach(b => b.onclick = async () => { try { await navigator.clipboard.writeText(items[+b.dataset.nc][1]); b.textContent = '✓ הועתק'; } catch { toast('לא הצלחתי להעתיק'); } });
   $('#ntAll', sh).onclick = async () => { busy(true); try { for (let i = 0; i < items.length; i++) await mail(i, sh.querySelector(`[data-nm="${i}"]`)); toast('✓ נשלחו המיילים'); } finally { busy(false); } };
-  $('#ntDone', sh).onclick = closeSheet;
+  $('#ntDone', sh).onclick = () => (onBack ? onBack() : closeSheet());
 }
 
 // ---- התראות: חגים שנופלים על טיפולים, מסמכים שתוקפם נגמר, מכסות שנגמרות (זהה ל-Windows)

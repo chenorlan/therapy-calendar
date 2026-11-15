@@ -1,5 +1,5 @@
 // שומר את קבצי האפליקציה כדי שתיפתח מהר. הנתונים עצמם תמיד נטענים מ-Google.
-const CACHE = 'therapy-calendar-v32';
+const CACHE = 'therapy-calendar-v35';
 const FILES = ['./', 'index.html', 'app.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 // התקנה לא נכשלת גם אם קובץ אחד לא נטען – אחרת השיתוף לאפליקציה לא יעבוד
 self.addEventListener('install', e => {
