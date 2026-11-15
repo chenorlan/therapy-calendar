@@ -9,11 +9,12 @@ const SCOPE_LIST = SCOPES.split(' ');
 const PAY_KEYS = ['paid', 'pay_method', 'pay_note', 'pay_amount', 'pay_total', 'pay_date', 'pay_ref', 'pay_payer', 'pay_receipt'];
 const RECEIPTS_FOLDER = 'יומן הטיפולים – אישורי תשלום';
 const CANCEL_KEYS = ['cancel_reason', 'cancel_note'];
-const RCPT_KEYS = ['rcpt_issued', 'rcpt_no', 'rcpt_date'];
+const RCPT_KEYS = ['rcpt_issued', 'rcpt_no', 'rcpt_date', 'rcpt_doc', 'rcpt_url', 'rcpt_file', 'rcpt_count', 'rcpt_src'];
 const APP_KEYS = ['attended', ...PAY_KEYS, ...CANCEL_KEYS, ...RCPT_KEYS, 'price', 'session_no'];  // זהה ל-Windows
 const CANCEL_REASONS = [['client', 'ביטול של המטופל/ת'], ['sick', 'מחלה'], ['me', 'ביטול שלי'], ['holiday', 'חג / חופשה'], ['noshow', 'לא הגיע/ה בלי הודעה'], ['other', 'אחר']];
 const APP_FOLDER = 'יומן הטיפולים', BACKUPS_FOLDER = 'גיבויים', SETTINGS_FILE = 'הגדרות.json', BACKUP_KEEP = 30;
-const DEFAULT_SETTINGS = { version: 1, default_price: 0, clients: {}, backup_email: true, holidays: true };
+const DEFAULT_MORNING = { env: 'sandbox', item: 'טיפול בקלינאות תקשורת', template: 'עבור {מספר_טיפולים} טיפולים בתאריכים: {תאריכים}', vat_included: true, send_email: true };
+const DEFAULT_SETTINGS = { version: 1, default_price: 0, clients: {}, backup_email: true, holidays: true, morning: { ...DEFAULT_MORNING } };
 // ---- חגי ישראל (לוח ישראלי, שמות בעברית) מ-hebcal.com – זהה ל-Windows
 const HOL = {};  // 'YYYY-MM-DD' → [[שם, 'yomtov'|'other']]
 const HOL_BG = { yomtov: '#FFF1D6', other: '#EEF2FF' }, HOL_FG = { yomtov: '#7A4B00', other: '#3B4A86' };
@@ -46,7 +47,11 @@ function ensureHolidays(days) {
     }).catch(e => toast(`לא הצלחתי לטעון את חגי ישראל (${y}): ${e.message}`)).finally(() => holLoading.delete(y));
   }
 }
-const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash'];
+const GEMINI_MODELS = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest'];
+const GEMINI_BUSY = [500, 502, 503, 504];  // עומס זמני אצל Google: מנסים מודל אחר, ואחרי כמה שניות שוב
+const GEMINI_BUSY_MSG = 'Gemini עמוס כרגע אצל Google (זה זמני). נסי שוב בעוד דקה–שתיים.';
+// כל ניסיון: מודל, ואחרי סבב מלא – המתנה קצרה וסבב נוסף (עד 3 סבבים)
+const geminiAttempts = () => [0, 1, 2].flatMap(round => GEMINI_MODELS.map((model, i) => ({ model, wait: i === 0 && round ? 3000 * round : 0 })));
 const API = 'https://www.googleapis.com/calendar/v3';
 const DEFAULT_TZ = 'Asia/Jerusalem';
 const DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
@@ -140,6 +145,89 @@ const evPrice = ev => toAmount(props(ev).price) || clientPrice(title(ev));
 // אירוע שאינו טיפול (למשל ישיבת צוות): לא נספר בסיכומים, במספור ובתשלומים – זהה ל-Windows
 const isSession = ev => props(ev).kind !== 'event';
 const EVENT_COLOR_ID = '8';
+// ---- Morning (חשבונית ירוקה): חשבונית מס/קבלה – זהה ל-Windows
+const MORNING_URLS = { production: 'https://api.greeninvoice.co.il/api/v1', sandbox: 'https://sandbox.d.greeninvoice.co.il/api/v1' };
+const MORNING_PAY = { cash: 1, bank: 4, bit: 10, paybox: 10, other: 11 };
+const morningCfg = () => ({ ...DEFAULT_MORNING, ...(S.settings.morning || {}) });
+const morningKeys = env => (store.get('morningKeys', {}) || {})[env] || {};
+const morningReady = () => { const k = morningKeys(morningCfg().env); return !!(k.id && k.secret); };
+async function morningCall(env, method, path, body, token) {
+  let r;
+  try {
+    r = await fetch(MORNING_URLS[env] + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  } catch (e) {
+    throw new Error('לא הצלחתי להתחבר ל-Morning מהטלפון (ייתכן שהם לא מאפשרים חיבור ישיר מדפדפן). אפשר להפיק את הקבלה מהמחשב, ולשייך כאן קבלה ידנית.');
+  }
+  let j = {}; try { j = await r.json(); } catch { /* ignore */ }
+  if (!r.ok) {
+    const msg = j.errorMessage || j.message || r.status;
+    if (r.status === 401 || r.status === 403) throw new Error(`Morning דחו את החיבור (${r.status}). בודקים את מפתח ה-API ושהמסלול כולל API.\n${msg}`);
+    throw new Error(`שגיאה מ-Morning (${r.status}): ${msg}`);
+  }
+  return j;
+}
+async function morningToken(env) {
+  if (DEMO) return 'demo';
+  const k = morningKeys(env);
+  let j;
+  try { j = await morningCall(env, 'POST', '/account/token', { id: k.id, secret: k.secret }); }
+  catch (e) {
+    if (/\((400|401|404)\)/.test(e.message)) throw new Error(env === 'sandbox'
+      ? 'המפתח לא נמצא בסביבת הבדיקות. מפתח מהחשבון הרגיל ב-Morning עובד רק בסביבה „פעיל”. לסביבת בדיקות צריך חשבון בדיקות נפרד (app.sandbox.d.greeninvoice.co.il) ומפתח משם.'
+      : 'Morning לא זיהו את המפתח. בודקים שמזהה המפתח והמפתח הסודי הועתקו במלואם, ושהמפתח פעיל.');
+    throw e;
+  }
+  if (!j.token) throw new Error('Morning לא החזירו אישור התחברות. בודקים את מזהה המפתח והסוד.');
+  return j.token;
+}
+async function morningMe(env) {
+  // בדיקת חיבור: קבלת אישור התחברות, ואם אפשר – שם העסק
+  if (DEMO) return { businessName: 'עסק לדוגמה' };
+  const tok = await morningToken(env);
+  for (const path of ['/users/me', '/businesses/me']) {
+    try { return await morningCall(env, 'GET', path, null, tok); } catch (e) { if (!/\(404\)/.test(e.message)) throw e; }
+  }
+  return {};
+}
+async function morningCreate(env, body) {
+  if (DEMO) { await new Promise(r => setTimeout(r, 400)); return { id: 'demodoc', number: 10045, url: { he: '#' } }; }
+  return morningCall(env, 'POST', '/documents', body, await morningToken(env));
+}
+const sessionAmount = ev => payAmount(ev) || evPrice(ev);
+const receiptDatesText = ss => ss.map(e => evTimes(e).s).sort((a, b) => a - b).map(dmy).join(', ');
+const renderReceiptText = (tpl, ss, name) => tpl.replace('{תאריכים}', receiptDatesText(ss)).replace('{מספר_טיפולים}', String(ss.length))
+  .replace('{שם_מטופל}', name).replace('{סכום}', fmtMoney(ss.reduce((a, e) => a + (sessionAmount(e) || 0), 0)));
+function morningDocument(ss, { name, emails, send, item, remarks, date, vatIncluded }) {
+  const byPrice = {}, pays = {};
+  for (const e of ss) { const a = Math.round(sessionAmount(e) * 100) / 100; byPrice[a] = (byPrice[a] || 0) + 1; }
+  for (const e of ss) { const p = props(e), k = (p.pay_method || 'other') + '|' + (p.pay_date || date); pays[k] = Math.round(((pays[k] || 0) + sessionAmount(e)) * 100) / 100; }
+  return { type: 320, date, lang: 'he', currency: 'ILS', vatType: 0, rounding: false, signed: true, attachment: !!(send && emails.length),
+    client: { name, emails, add: false },
+    income: Object.entries(byPrice).sort((a, b) => a[0] - b[0]).map(([price, n]) => ({ description: item, quantity: n, price: Number(price), currency: 'ILS', vatType: vatIncluded ? 1 : 0 })),
+    payment: Object.entries(pays).sort((a, b) => a[0].split('|')[1].localeCompare(b[0].split('|')[1])).map(([k, price]) => { const [m, d] = k.split('|'); return { type: MORNING_PAY[m] || 11, price, currency: 'ILS', date: d }; }),
+    remarks };
+}
+function receiptDetails(ev) {
+  const p = props(ev), morning = p.rcpt_src === 'morning';
+  const bits = [(morning ? 'חשבונית מס/קבלה' : 'קבלה') + (p.rcpt_no ? ' ' + p.rcpt_no : '')];
+  if (morning) bits.push('Morning');
+  if (p.rcpt_date) bits.push(dmy(parseDateOnly(p.rcpt_date)));
+  if (p.rcpt_count && p.rcpt_count !== '1') bits.push(`על ${p.rcpt_count} טיפולים`);
+  if (p.rcpt_file) bits.push('📎 מסמך מצורף');
+  return bits.join(' · ');
+}
+function paidWithoutReceipt(extra = []) {
+  const seen = new Set(), groups = {};
+  for (const e of [...extra, ...S.events, ...S.index]) {
+    if (seen.has(e.id) || !isSession(e) || evTimes(e).allDay || !canEdit(e)) continue;
+    seen.add(e.id);
+    if (paid(e) && !receiptIssued(e)) (groups[title(e).trim()] = groups[title(e).trim()] || []).push(e);
+  }
+  for (const k of Object.keys(groups)) groups[k].sort((a, b) => evTimes(a).s - evTimes(b).s);
+  return groups;
+}
+const sessionLine = e => `יום ${DAYS[evTimes(e).s.getDay()]} ${dmy(evTimes(e).s)} · ${ltr(hm(evTimes(e).s))}${sessionAmount(e) ? ' · ' + fmtMoney(sessionAmount(e)) : ' · סכום לא ידוע'}${payLabel(e) ? ' · ' + esc(payLabel(e)) : ''}`;
+
 // ---- מייל של המטופל/ת או ההורה, וזימון ליומן (זהה ל-Windows)
 const clientInfo = (name, st = S.settings) => ((st.clients || {})[(name || '').trim()]) || {};
 const clientEmails = (name, st) => (clientInfo(name, st).emails || []).filter(Boolean);
@@ -462,17 +550,20 @@ async function geminiChat(system, contents) {
   if (DEMO) { await new Promise(r => setTimeout(r, 500)); return Mock.answer(contents); }
   const key = store.get('geminiKey', '');
   const body = { systemInstruction: { parts: [{ text: system }] }, contents, generationConfig: { temperature: 0.2 } };
-  for (const model of GEMINI_MODELS) {
+  let busy = false;
+  for (const { model, wait } of geminiAttempts()) {
+    if (wait) await new Promise(res => setTimeout(res, wait));
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (r.status === 404) continue;
+    if (GEMINI_BUSY.includes(r.status)) { busy = true; continue; }
     let j = {}; try { j = await r.json(); } catch { /* ignore */ }
     if (r.status === 401 || r.status === 403) throw new Error('מפתח Gemini לא תקין או שאין לו הרשאה. אפשר להחליף אותו בתפריט ☰.');
     if (r.status === 429) throw new Error('הגעת למגבלת השימוש של Gemini. בודקים שהחיוב מופעל ב-AI Studio ומנסים שוב בעוד דקה.');
     if (!r.ok) throw new Error(`שגיאה מ-Gemini (${r.status}). ${(j.error && j.error.message) || ''}`);
     try { return j.candidates[0].content.parts.map(x => x.text || '').join(''); } catch { throw new Error('Gemini לא החזיר תשובה.'); }
   }
-  throw new Error('לא נמצא מודל Gemini זמין.');
+  throw new Error(busy ? GEMINI_BUSY_MSG : 'לא נמצא מודל Gemini זמין.');
 }
 const AI_SYSTEM = `את/ה עוזר/ת אישי/ת של קלינאית תקשורת עצמאית, ועונה על שאלות על היסטוריית הטיפולים שלה.
 הנתונים שקיבלת הם רשימת הפגישות מהיומן שלה, בפורמט טבלה. ענה/י תמיד בעברית, בקצרה ובבהירות.
@@ -574,10 +665,13 @@ async function geminiRead(blob) {
   const body = { contents: [{ parts: [{ inline_data: { mime_type: blob.type || 'image/jpeg', data: await blobToBase64(blob) } },
     { text: GEMINI_PROMPT.replace('{year}', String(new Date().getFullYear())) }] }],
     generationConfig: { responseMimeType: 'application/json', responseSchema: GEMINI_SCHEMA, temperature: 0 } };
-  for (const model of GEMINI_MODELS) {
+  let busy = false;
+  for (const { model, wait } of geminiAttempts()) {
+    if (wait) await new Promise(res => setTimeout(res, wait));
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (r.status === 404) continue;
+    if (GEMINI_BUSY.includes(r.status)) { busy = true; continue; }
     let j = {}; try { j = await r.json(); } catch { /* ignore */ }
     const msg = (j.error && j.error.message) || '';
     if (r.status === 400 || r.status === 401 || r.status === 403) {
@@ -589,7 +683,7 @@ async function geminiRead(blob) {
     try { return JSON.parse(j.candidates[0].content.parts[0].text); }
     catch { throw new Error('Gemini לא החזיר תשובה שאפשר לקרוא. נסו צילום ברור יותר.'); }
   }
-  throw new Error('לא נמצא מודל Gemini זמין.');
+  throw new Error(busy ? GEMINI_BUSY_MSG : 'לא נמצא מודל Gemini זמין.');
 }
 // הקטנת תמונות גדולות (צילומי מצלמה) לפני שליחה ושמירה
 async function shrinkImage(blob) {
@@ -720,8 +814,23 @@ function selectedCals() {
   return c ? [c] : [];
 }
 
+function apiNotEnabled(msg) {
+  // שגיאה של Google: שירות (Drive / Gmail / Calendar) לא הופעל בפרויקט
+  const m = /([\w.]+)\.googleapis\.com\/overview\?project=(\d+)/.exec(msg || '');
+  if (!m || !/has not been used|accessNotConfigured|disabled/.test(msg)) return null;
+  const names = { drive: 'Google Drive API', gmail: 'Gmail API', 'calendar-json': 'Google Calendar API', generativelanguage: 'Gemini API' };
+  return [names[m[1]] || m[1], `https://console.developers.google.com/apis/api/${m[1]}.googleapis.com/overview?project=${m[2]}`];
+}
 async function handleErr(e) {
   if (e instanceof NeedLogin) { showLoginBanner(); return; }
+  const na = apiNotEnabled(e.message || '');
+  if (na) {
+    const sh = openSheet(`<h3 style="margin:4px 0 8px">צריך להפעיל את ${esc(na[0])}</h3>
+      <p>זו פעולה חד-פעמית ב-Google Cloud: פותחים את הדף, לוחצים <b>Enable</b> (או „הפעלה”), מחכים 2–3 דקות ומנסים שוב.</p>
+      <div class="actions"><a class="btn primary" style="text-align:center;text-decoration:none" href="${esc(na[1])}" target="_blank" rel="noopener">פתיחת דף ההפעלה</a><button class="btn" id="okBtn">סגירה</button></div>`);
+    $('#okBtn', sh).onclick = closeSheet;
+    return;
+  }
   alertSheet('משהו השתבש', e.message || String(e));
 }
 
@@ -1025,7 +1134,8 @@ function summaryHtml() {
     }
     h += '</div>';
   }
-  h += `<div class="sum-actions no-print"><button class="btn" id="csvBtn">ייצוא לאקסל</button><button class="btn primary" id="pdfBtn">שמירה כ-PDF</button></div>
+  h += `<div class="sum-actions no-print"><button class="btn" id="morningBtn">🧾 קבלות ב-Morning</button></div>
+    <div class="sum-actions no-print"><button class="btn" id="csvBtn">ייצוא לאקסל</button><button class="btn primary" id="pdfBtn">שמירה כ-PDF</button></div>
     <p class="note no-print" style="padding:0 14px">לחיצה על פגישה פותחת אותה לסימון או לתיקון.</p>`;
   return h;
 }
@@ -1069,6 +1179,7 @@ function bindView() {
   const sc = $('#sumClient'); if (sc) sc.onchange = () => { S.sumClient = sc.value; renderView(); };
   const sf = $('#sumFilter'); if (sf) sf.onchange = () => { S.sumFilter = sf.value; renderView(); };
   const cb = $('#csvBtn'); if (cb) cb.onclick = exportCsv;
+  const mb = $('#morningBtn'); if (mb) mb.onclick = () => showMorningIssue({ client: S.sumClient || null, extra: S.events });
   const pb = $('#pdfBtn'); if (pb) pb.onclick = () => window.print();
 }
 function goDay(d) { S.anchor = d; setView('day'); }
@@ -1133,8 +1244,10 @@ function showDetails(ev) {
       ${paid(ev) && props(ev).pay_receipt ? '<button class="btn" id="rcptBtn" style="width:100%;margin-bottom:8px">📎 צפייה באישור התשלום</button>' : ''}
       <div class="sec">קבלה</div><div class="seg">
         <button class="btn ${!receiptIssued(ev) ? 'on' : ''}" id="rcNo" ${dis}>לא הוצאה</button>
-        <button class="btn ${receiptIssued(ev) ? 'on' : ''}" id="rcYes" ${dis}>🧾 הוצאה קבלה${receiptIssued(ev) ? '' : '…'}</button></div>
-      ${receiptIssued(ev) && (props(ev).rcpt_no || props(ev).rcpt_date) ? `<p class="note" style="margin-top:-4px">${[props(ev).rcpt_no ? 'מספר ' + esc(props(ev).rcpt_no) : '', props(ev).rcpt_date ? dmy(parseDateOnly(props(ev).rcpt_date)) : ''].filter(Boolean).join(' · ')}</p>` : ''}
+        <button class="btn ${receiptIssued(ev) && props(ev).rcpt_src === 'morning' ? 'on' : ''}" id="rcMorning" ${edit && paid(ev) && !receiptIssued(ev) ? '' : 'disabled'}>🧾 ${receiptIssued(ev) && props(ev).rcpt_src === 'morning' ? 'הופקה ב-Morning' : 'הפקה ב-Morning…'}</button>
+        <button class="btn ${receiptIssued(ev) && props(ev).rcpt_src !== 'morning' ? 'on' : ''}" id="rcYes" ${dis}>שיוך ידני…</button></div>
+      ${receiptIssued(ev) ? `<p class="note" style="margin-top:-4px">${esc(receiptDetails(ev))}</p>` : ''}
+      ${receiptIssued(ev) && (props(ev).rcpt_url || props(ev).rcpt_file) ? '<button class="btn" id="rcView" style="width:100%;margin-bottom:8px">📄 צפייה בקבלה</button>' : ''}
       <p class="note">הסימונים נשמרים רק לפגישה הזו, לא לכל הסדרה.</p>`;
   }
   h += `<div class="actions">
@@ -1153,8 +1266,16 @@ function showDetails(ev) {
     showDetails(ev);
   });
   const nb = $('#numBtn', sh); if (nb) nb.onclick = () => showSessionNo(ev);
-  const rn = $('#rcNo', sh); if (rn) rn.onclick = () => { setStatus(ev, Object.fromEntries(RCPT_KEYS.map(k => [k, '']))); showDetails(ev); };
+  const rn = $('#rcNo', sh); if (rn) rn.onclick = async () => {
+    if (props(ev).rcpt_src === 'morning') {
+      const ok = await choose('ביטול סימון קבלה', 'הקבלה הופקה ב-Morning. ביטול הסימון כאן לא מבטל את המסמך ב-Morning (שם מבטלים במסמך זיכוי).', [{ label: 'לבטל את הסימון', value: true, cls: 'danger' }]);
+      if (!ok) { showDetails(ev); return; }
+    }
+    setStatus(ev, Object.fromEntries(RCPT_KEYS.map(k => [k, '']))); showDetails(ev);
+  };
   const ry = $('#rcYes', sh); if (ry) ry.onclick = () => showReceiptIssued(ev);
+  const rm = $('#rcMorning', sh); if (rm) rm.onclick = () => showMorningIssue({ ev });
+  const rv = $('#rcView', sh); if (rv) rv.onclick = () => viewReceiptDoc(ev);
   const ub = $('#unpaidBtn', sh); if (ub) ub.onclick = () => {
     const old = props(ev).pay_receipt || null;
     setStatus(ev, Object.fromEntries(PAY_KEYS.map(k => [k, ''])), { detach: old }); showDetails(ev);
@@ -1237,13 +1358,142 @@ function showSessionNo(ev) {
   };
 }
 function showReceiptIssued(ev) {
+  // שיוך קבלה שהוצאת בעצמך: מספר, תאריך, מסמך (לא חובה), ואפשר לכמה טיפולים יחד
   const p = props(ev);
-  const sh = openSheet(`<h3 style="margin:4px 0 6px">קבלה על הפגישה של „${esc(title(ev))}”</h3>
+  const others = (paidWithoutReceipt()[title(ev).trim()] || []).filter(e => e.id !== ev.id);
+  let file = null;
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">שיוך קבלה שהוצאת בעצמך – „${esc(title(ev))}”</h3>
     <div class="two"><div class="field"><label>מספר קבלה</label><input type="text" id="rcNum" placeholder="לא חובה" value="${esc(p.rcpt_no || '')}"></div>
       <div class="field"><label>תאריך</label><input type="date" id="rcDate" value="${esc(p.rcpt_date || isoDate(today()))}"></div></div>
+    <label class="btn" style="display:block;text-align:center">📎 צירוף מסמך הקבלה (PDF או תמונה)<input type="file" accept="application/pdf,image/*" id="rcFile" hidden></label>
+    <div class="note" id="rcFileNote">${p.rcpt_file ? 'יש מסמך מצורף' : ''}</div>
+    ${others.length ? `<div class="sec" style="margin-top:8px">הקבלה כוללת גם את הטיפולים האלה:</div>${others.map((e, i) => `<label class="radio"><input type="checkbox" data-oi="${i}">${sessionLine(e)}</label>`).join('')}` : ''}
     <div class="actions"><button class="btn primary" id="rcSave">שמירה</button><button class="btn" id="rcCancel">ביטול</button></div>`);
+  $('#rcFile', sh).onchange = e => { file = e.target.files[0] || null; $('#rcFileNote', sh).textContent = file ? '✓ ' + file.name : ''; };
   $('#rcCancel', sh).onclick = () => showDetails(ev);
-  $('#rcSave', sh).onclick = () => { setStatus(ev, { rcpt_issued: 'yes', rcpt_no: $('#rcNum', sh).value.trim(), rcpt_date: $('#rcDate', sh).value }); showDetails(ev); };
+  $('#rcSave', sh).onclick = async () => {
+    const targets = [ev, ...[...sh.querySelectorAll('[data-oi]:checked')].map(i => others[Number(i.dataset.oi)])];
+    const ch = { rcpt_issued: 'yes', rcpt_no: $('#rcNum', sh).value.trim(), rcpt_date: $('#rcDate', sh).value, rcpt_src: 'manual', rcpt_count: targets.length > 1 ? String(targets.length) : '' };
+    if (file) {
+      busy(true);
+      try { const f = await Drive.upload(file, `קבלה ${ch.rcpt_no} ${title(ev)} ${file.name}`); ch.rcpt_file = f.id; }
+      catch (e) { busy(false); handleErr(e); return; }
+      busy(false);
+    }
+    for (const t of targets) setStatus(t, ch);
+    showDetails(ev);
+  };
+}
+async function viewReceiptDoc(ev) {
+  const p = props(ev);
+  if (p.rcpt_url) { window.open(p.rcpt_url, '_blank', 'noopener'); return; }
+  if (!p.rcpt_file) return;
+  busy(true);
+  try {
+    const blob = await Drive.download(p.rcpt_file);
+    const url = URL.createObjectURL(blob);
+    if ((blob.type || '').includes('pdf')) { window.open(url, '_blank'); return; }
+    const sh = openSheet(`<h3 style="margin:4px 0 8px">קבלה – ${esc(title(ev))}</h3><img src="${url}" style="width:100%;border-radius:10px;border:1px solid var(--line2)">
+      <div class="actions"><button class="btn" id="rvBack">חזרה</button></div>`);
+    $('#rvBack', sh).onclick = () => { URL.revokeObjectURL(url); showDetails(ev); };
+  } catch (e) { handleErr(e); } finally { busy(false); }
+}
+function showMorningSettings(then) {
+  const m = morningCfg(), keys = store.get('morningKeys', {}) || {};
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">Morning – חיבור והגדרות קבלות</h3>
+    <p class="note">המפתחות נוצרים ב-Morning: אזור אישי ← כלים למפתחים ← מפתחות API. הם נשמרים רק בטלפון הזה. מומלץ להתחיל בסביבת הבדיקות.</p>
+    <div class="field"><label>סביבה</label><select id="moEnv"><option value="sandbox" ${m.env === 'sandbox' ? 'selected' : ''}>סביבת בדיקות (sandbox) – בלי מסמכים אמיתיים</option><option value="production" ${m.env === 'production' ? 'selected' : ''}>פעיל – מסמכים אמיתיים</option></select></div>
+    <div class="field"><label>מזהה מפתח (ID)</label><input type="text" dir="ltr" id="moId" autocomplete="off"></div>
+    <div class="field"><label>מפתח סודי (Secret)</label><input type="text" dir="ltr" id="moSecret" autocomplete="off" style="-webkit-text-security:disc"></div>
+    <div class="field"><label>תיאור השירות</label><input type="text" id="moItem" value="${esc(m.item)}"></div>
+    <div class="field"><label>טקסט קבוע על הקבלה</label><textarea id="moTpl" rows="3">${esc(m.template)}</textarea>
+      <p class="note">אפשר להשתמש ב: {תאריכים} {מספר_טיפולים} {שם_מטופל} {סכום}</p></div>
+    <label class="check"><input type="checkbox" id="moVat" ${m.vat_included ? 'checked' : ''}>המחירים כוללים מע״מ</label>
+    <label class="check"><input type="checkbox" id="moSend" ${m.send_email ? 'checked' : ''}>לשלוח את הקבלה למייל של המטופל/ת או ההורה</label>
+    <div class="actions"><button class="btn" id="moTest">בדיקת חיבור</button></div><p class="note" id="moRes"></p>
+    <div class="actions"><button class="btn primary" id="moSave">שמירה</button><button class="btn" id="moCancel">ביטול</button></div>`);
+  const k = { ...keys };
+  let env = m.env;
+  const load = () => { $('#moId', sh).value = (k[env] || {}).id || ''; $('#moSecret', sh).value = (k[env] || {}).secret || ''; };
+  const keep = () => { k[env] = { id: $('#moId', sh).value.trim(), secret: $('#moSecret', sh).value.trim() }; };
+  load();
+  $('#moEnv', sh).onchange = e => { keep(); env = e.target.value; load(); $('#moRes', sh).textContent = ''; };
+  $('#moTest', sh).onclick = async () => {
+    keep(); store.set('morningKeys', k); $('#moRes', sh).textContent = 'בודק…';
+    try { const me = await morningMe(env); $('#moRes', sh).textContent = '✓ החיבור עובד' + ((me.businessName || me.firstName) ? ' – ' + (me.businessName || me.firstName) : ''); }
+    catch (e) { $('#moRes', sh).textContent = '⚠ ' + e.message; }
+  };
+  $('#moCancel', sh).onclick = closeSheet;
+  $('#moSave', sh).onclick = async () => {
+    keep(); store.set('morningKeys', k);
+    await saveSettings({ ...S.settings, morning: { env, item: $('#moItem', sh).value.trim() || DEFAULT_MORNING.item, template: $('#moTpl', sh).value.trim(), vat_included: $('#moVat', sh).checked, send_email: $('#moSend', sh).checked } });
+    closeSheet(); if (then) then();
+  };
+}
+function showMorningIssue({ ev = null, client = null, extra = [] } = {}) {
+  // הפקת חשבונית מס/קבלה אחת ב-Morning – לטיפול אחד או לכמה טיפולים יחד
+  if (!morningReady()) { showMorningSettings(() => showMorningIssue({ ev, client, extra })); return; }
+  const groups = paidWithoutReceipt(extra), names = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'he'));
+  if (!names.length) { alertSheet('קבלות ב-Morning', 'אין טיפולים ששולמו וטרם הוצאה להם קבלה.'); return; }
+  let name = ev ? title(ev).trim() : (client && groups[client] ? client : names[0]);
+  if (!groups[name]) { alertSheet('קבלות ב-Morning', 'אין לפגישה הזו תשלום בלי קבלה.'); return; }
+  const m = morningCfg();
+  const pre = ev ? new Set(groups[name].filter(e => evTimes(e).s.getMonth() === evTimes(ev).s.getMonth() && evTimes(e).s.getFullYear() === evTimes(ev).s.getFullYear()).map(e => e.id).concat([ev.id])) : null;
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">הפקת חשבונית מס/קבלה ב-Morning</h3>
+    ${m.env === 'sandbox' ? '<p class="note" style="background:#FFF1D6;color:#7A4B00;padding:6px 8px;border-radius:8px">סביבת בדיקות: המסמך לא יהיה אמיתי. (אפשר לעבור לפעיל בתפריט ☰ ← Morning)</p>' : ''}
+    <div class="field"><label>מטופל/ת</label><select id="miClient">${names.map(n => `<option ${n === name ? 'selected' : ''} value="${esc(n)}">${esc(n)} (${groups[n].length} טיפולים בלי קבלה)</option>`).join('')}</select></div>
+    <div class="sec">הטיפולים שייכללו בקבלה (אפשר כמה – קבלה אחת על כולם):</div><div id="miList"></div>
+    <div class="field"><label>שם על הקבלה</label><input type="text" id="miName"></div>
+    <div class="field"><label class="check"><input type="checkbox" id="miSend" ${m.send_email ? 'checked' : ''}>לשלוח את הקבלה במייל ל:</label><input type="email" dir="ltr" id="miEmails"></div>
+    <div class="field"><label>תיאור השירות</label><input type="text" id="miItem" value="${esc(m.item)}"></div>
+    <div class="field"><label>טקסט קבוע</label><textarea id="miRemarks" rows="3"></textarea></div>
+    <div class="field"><label>תאריך המסמך</label><input type="date" id="miDate" value="${isoDate(today())}"></div>
+    <p class="totals" id="miSum" style="padding:0"></p><p class="err" id="miErr"></p>
+    <div class="actions"><button class="btn primary" id="miGo">הפקה ב-Morning</button><button class="btn" id="miCancel">ביטול</button></div>`);
+  let touched = false;
+  $('#miRemarks', sh).oninput = () => { touched = true; };
+  const chosen = () => [...sh.querySelectorAll('[data-mi]:checked')].map(i => groups[name][Number(i.dataset.mi)]);
+  const upd = () => {
+    const ss = chosen(), total = ss.reduce((a, e) => a + (sessionAmount(e) || 0), 0), by = {};
+    for (const e of ss) by[payLabel(e) || 'לא צוין'] = (by[payLabel(e) || 'לא צוין'] || 0) + (sessionAmount(e) || 0);
+    if (!touched) $('#miRemarks', sh).value = ss.length ? renderReceiptText(m.template, ss, name) : '';
+    $('#miSum', sh).textContent = ss.length ? `${ss.length} טיפולים · סה״כ ${fmtMoney(total)} · תשלום: ${Object.entries(by).map(([k, v]) => k + ' ' + fmtMoney(v)).join(', ')}` : 'לא נבחרו טיפולים.';
+  };
+  const fill = () => {
+    const ss = groups[name], sel = pre && name === title(ev || {}).trim() ? pre : new Set(ss.map(e => e.id));
+    $('#miList', sh).innerHTML = ss.map((e, i) => `<label class="radio"><input type="checkbox" data-mi="${i}" ${sel.has(e.id) ? 'checked' : ''}>${sessionLine(e)}</label>`).join('');
+    sh.querySelectorAll('[data-mi]').forEach(i => i.onchange = upd);
+    $('#miName', sh).value = (ss.map(e => props(e).pay_payer).find(Boolean)) || name;
+    $('#miEmails', sh).value = clientEmails(name).join(', ');
+    upd();
+  };
+  $('#miClient', sh).onchange = e => { name = e.target.value; touched = false; fill(); };
+  fill();
+  $('#miCancel', sh).onclick = () => { if (ev) showDetails(ev); else closeSheet(); };
+  $('#miGo', sh).onclick = async () => {
+    const ss = chosen(), err = t => { $('#miErr', sh).textContent = t; };
+    if (!ss.length) return err('יש לבחור לפחות טיפול אחד.');
+    const miss = ss.find(e => !sessionAmount(e));
+    if (miss) return err(`לטיפול ב-${dmy(evTimes(miss).s)} אין סכום. מוסיפים סכום בסימון התשלום או קובעים מחיר.`);
+    const [emails, bad] = parseEmails($('#miEmails', sh).value);
+    if (bad.length) return err(`המייל לא תקין: ${bad.join(', ')}`);
+    const payer = $('#miName', sh).value.trim(); if (!payer) return err('יש למלא שם על הקבלה.');
+    const total = ss.reduce((a, e) => a + sessionAmount(e), 0), date = $('#miDate', sh).value;
+    const remarks = $('#miRemarks', sh).value.trim(), item = $('#miItem', sh).value.trim() || m.item, send = $('#miSend', sh).checked;
+    const real = m.env === 'production';
+    const ok = await choose('הפקת קבלה', `להפיק חשבונית מס/קבלה על ${ss.length} טיפולים, סה״כ ${fmtMoney(total)}, על שם „${payer}”?` + (real ? '\n\nזה מסמך רשמי: אחרי ההפקה אי אפשר למחוק אותו, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }]);
+    if (!ok) { showMorningIssue({ ev, client: name, extra }); return; }
+    busy(true);
+    try {
+      const body = morningDocument(ss, { name: payer, emails, send, item, remarks, date, vatIncluded: m.vat_included });
+      const res = await morningCreate(m.env, body);
+      const url = res.url || {};
+      const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: ss.length > 1 ? String(ss.length) : '' };
+      for (const e of ss) setStatus(e, ch);
+      alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.`);
+    } catch (e) { alertSheet('ההפקה נכשלה', e.message); }
+    finally { busy(false); }
+  };
 }
 function showPrices() {
   const names = [...new Set([...S.events, ...S.index].filter(e => !evTimes(e).allDay && isSession(e)).map(e => title(e).trim()).concat(Object.keys(S.settings.clients || {})))].sort((a, b) => a.localeCompare(b, 'he'));
@@ -1848,6 +2098,7 @@ function showMenu() {
     <div class="menu-item"><span style="flex:1">קובץ גיבוי</span><button class="btn" id="mExport">ייצוא</button><button class="btn" id="mRestore">שחזור</button></div>
     <label class="check"><input type="checkbox" id="mEmail" ${S.settings.backup_email !== false ? 'checked' : ''}>שליחת הגיבוי היומי למייל</label>
     <div class="menu-item"><label class="check" style="flex:1"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label><button class="btn" id="mHolRefresh">רענון</button></div>
+    <div class="menu-item"><span style="flex:1">Morning – קבלות ${morningReady() ? '✓' : ''}</span><button class="btn" id="mMorning">הגדרה</button></div>
     <h3 style="margin:18px 0 4px">צילומי תשלום</h3>
     <div class="menu-item"><span style="flex:1">מפתח Gemini: ${store.get('geminiKey', '') ? '✓ מוגדר' : 'לא מוגדר'}</span><button class="btn" id="gKeyBtn">${store.get('geminiKey', '') ? 'החלפה' : 'הגדרה'}</button></div>
     <h3 style="margin:18px 0 4px">חשבון</h3>
@@ -1858,6 +2109,7 @@ function showMenu() {
   $('#soBtn', sh).onclick = signOut;
   $('#gKeyBtn', sh).onclick = () => askGeminiKey(null);
   $('#mPrices', sh).onclick = showPrices;
+  $('#mMorning', sh).onclick = () => showMorningSettings(null);
   $('#mBackup', sh).onclick = () => { closeSheet(); makeBackup(false); };
   $('#mExport', sh).onclick = () => { closeSheet(); exportBackupFile(); };
   $('#mRestore', sh).onclick = showRestore;
