@@ -1,4 +1,4 @@
-const APP_VERSION = '30';
+const APP_VERSION = '32';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -352,10 +352,11 @@ function computeNumbers(events) {
 }
 function numberChanges(ev, { props: np = null, remove = false, start = null, end = null } = {}) {
   // אילו מפגשים אחרים של אותו מטופל/ת ישנו מספר אם נשנה את הפגישה הזו
-  if (!S.index.some(e => e.id === ev.id)) return [];
-  const before = computeNumbers(S.index);
+  const pool = numberPool();
+  if (!pool.some(e => e.id === ev.id)) return [];
+  const before = computeNumbers(pool);
   const sim = [];
-  for (const e of S.index) {
+  for (const e of pool) {
     if (e.id !== ev.id) { sim.push(e); continue; }
     if (remove) continue;
     const e2 = { ...e };
@@ -364,7 +365,7 @@ function numberChanges(ev, { props: np = null, remove = false, start = null, end
     sim.push(e2);
   }
   const after = computeNumbers(sim), name = title(ev).trim();
-  return S.index.filter(e => e.id !== ev.id && title(e).trim() === name && (before[e.id] || null) !== (after[e.id] || null))
+  return pool.filter(e => e.id !== ev.id && title(e).trim() === name && (before[e.id] || null) !== (after[e.id] || null))
     .sort((a, b) => evTimes(a).s - evTimes(b).s).map(e => [e, before[e.id] || null, after[e.id] || null]);
 }
 async function guardSequence(ev, change, allowKeep = true) {
@@ -382,7 +383,8 @@ async function guardSequence(ev, change, allowKeep = true) {
 }
 function applyPin(pin) { if (pin) setStatus(pin[0], { session_no: String(pin[1]) }); }
 function continuedNumber(ev) {
-  const sim = S.index.map(e => e.id === ev.id ? { ...e, extendedProperties: { private: { ...props(ev), session_no: '' } } } : e);
+  const pool = numberPool(), sim = pool.map(e => e.id === ev.id ? { ...e, extendedProperties: { private: { ...props(ev), session_no: '' } } } : e);
+  if (!pool.some(e => e.id === ev.id)) sim.push({ ...ev, extendedProperties: { private: { ...props(ev), session_no: '' } } });
   return computeNumbers(sim)[ev.id] || null;
 }
 const sessionNo = ev => S.numbers[ev.id] || null;
@@ -398,11 +400,14 @@ async function loadIndex() {
     if (!loadIndex.alerted) { loadIndex.alerted = true; setTimeout(refreshAlerts, 2500); setTimeout(importIntake, 4000); }
   } catch { /* ignore */ }
 }
-function renumber() { S.numbers = computeNumbers(S.index); renderView.keepScroll = true; renderView(); }
+// המספור מחושב מההיסטוריה (שנתיים אחורה), וגם מהפגישות שמוצגות עכשיו – כדי שמספר שנקבע יופיע מיד,
+// גם אם ההיסטוריה עוד לא נטענה או שהפגישה מחוץ לטווח שלה (זהה ל-Windows)
+function numberPool() { const ids = new Set(S.index.map(e => e.id)); return S.index.concat(S.events.filter(e => !ids.has(e.id))); }
+function renumber() { S.numbers = computeNumbers(numberPool()); renderView.keepScroll = true; renderView(); }
 function syncIndex(ev) {
   const it = S.index.find(x => x.id === ev.id);
   if (it) it.extendedProperties = JSON.parse(JSON.stringify(ev.extendedProperties || {}));
-  S.numbers = computeNumbers(S.index);
+  S.numbers = computeNumbers(numberPool());
 }
 function changed() { renderView.keepScroll = true; loadEvents(); loadIndex(); }
 function payDetails(ev) {
@@ -1024,6 +1029,7 @@ async function loadEvents() {
     const evs = await G.eventsMany(selectedCals(), start, end);
     if (seq !== loadSeq) return;
     S.events = evs; S.loaded = true; hideBanner();
+    S.numbers = computeNumbers(numberPool());
     renderView();
     setTimeout(maybeDaySummary, 800);
   } catch (e) { if (seq === loadSeq) handleErr(e); }
@@ -3072,7 +3078,7 @@ function showPayment(ev) {
   const sh = openSheet(`<h3 style="margin:4px 0 6px">איך שולמה הפגישה של „${esc(title(ev))}”?</h3>
     ${PAY_METHODS.map(([k, l]) => `<label class="radio"><input type="radio" name="pm" value="${k}" ${p.pay_method === k ? 'checked' : ''}>${l}</label>`).join('')}
     <div class="field"><input type="text" id="payNote" placeholder="מה? למשל צ׳ק, כרטיס אשראי, הוראת קבע…" value="${esc(p.pay_note || '')}"></div>
-    <div class="two"><div class="field"><label>סכום (₪)</label><input type="text" inputmode="decimal" id="payAmt" dir="ltr" placeholder="לא חובה" value="${esc(p.pay_amount || '')}"></div>
+    <div class="two"><div class="field"><label>סכום (₪)</label><input type="text" inputmode="decimal" id="payAmt" dir="ltr" placeholder="לא חובה" value="${esc(p.pay_amount || (evPrice(ev) ? String(evPrice(ev)) : ''))}"></div>
       <div class="field"><label>תאריך התשלום</label><input type="date" id="payDate" value="${esc(p.pay_date || isoDate(today()))}"></div></div>
     <div class="field"><label>אסמכתא</label><input type="text" id="payRef" placeholder="לא חובה" value="${esc(p.pay_ref || '')}"></div>
     <div class="field"><label>צילום אישור</label>
