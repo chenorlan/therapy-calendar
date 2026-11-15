@@ -886,6 +886,12 @@ async function handleErr(e) {
   alertSheet('משהו השתבש', e.message || String(e));
 }
 
+async function handleDocument(file) {
+  // מסמך שנבחר או שותף: אישור תשלום של מטופל/ת, או הוצאה שלי ל-Morning
+  const kind = await choose('מה המסמך הזה?', '', [{ label: '₪ אישור תשלום של מטופל/ת', value: 'pay', cls: 'primary' }, { label: '📤 הוצאה שלי – להעלות ל-Morning', value: 'expense' }]);
+  if (kind === 'pay') startReceipt(file);
+  else if (kind === 'expense') showExpenses([file instanceof File ? file : new File([file], `הוצאה ${isoDate(today())}.${(file.type || '').includes('pdf') ? 'pdf' : 'jpg'}`, { type: file.type || 'image/jpeg' })]);
+}
 async function takeSharedImage() {
   // תמונה ששותפה לאפליקציה מתפריט השיתוף של אנדרואיד
   if (!new URLSearchParams(location.search).has('receipt') || !('caches' in window)) return;
@@ -896,10 +902,7 @@ async function takeSharedImage() {
     if (!r) return;
     await cache.delete('shared-receipt');
     const blob = await r.blob();
-    // מה זה המסמך ששותף?
-    const kind = await choose('מה לעשות עם המסמך?', '', [{ label: '₪ אישור תשלום של מטופל/ת', value: 'pay', cls: 'primary' }, { label: '📤 הוצאה שלי – להעלות ל-Morning', value: 'expense' }]);
-    if (kind === 'pay') startReceipt(blob);
-    else if (kind === 'expense') showExpenses([new File([blob], `הוצאה ${isoDate(today())}.${(blob.type || '').includes('pdf') ? 'pdf' : 'jpg'}`, { type: blob.type || 'image/jpeg' })]);
+    handleDocument(blob);
   } catch { /* ignore */ }
 }
 async function loadCalendars() {
@@ -2313,7 +2316,7 @@ function init() {
   $('#menuBtn').onclick = showMenu;
   $('#receiptBtn').onclick = () => $('#receiptFile').click();
   $('#aiBtn').onclick = () => { if (S.token && S.calendars.length) showAI(); };
-  $('#receiptFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) startReceipt(f); };
+  $('#receiptFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) handleDocument(f); };
   $('#refreshBtn').onclick = () => { renderView.keepScroll = true; S.calendars.length ? loadEvents() : loadCalendars(); };
   $('#todayBtn').onclick = () => { S.anchor = today(); S.loaded = false; renderView(); loadEvents(); };
   $('#prevBtn').onclick = () => step(-1);
