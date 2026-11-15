@@ -1,4 +1,4 @@
-const APP_VERSION = '38';
+const APP_VERSION = '39';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -16,7 +16,7 @@ const APP_KEYS = ['attended', ...PAY_KEYS, ...CANCEL_KEYS, ...RCPT_KEYS, 'price'
 const CANCEL_REASONS = [['client', 'ביטול של המטופל/ת'], ['sick', 'מחלה'], ['me', 'ביטול שלי'], ['holiday', 'חג / חופשה'], ['noshow', 'לא הגיע/ה בלי הודעה'], ['other', 'אחר']];
 const APP_FOLDER = 'יומן הטיפולים', BACKUPS_FOLDER = 'גיבויים', SETTINGS_FILE = 'הגדרות.json', BACKUP_KEEP = 30;
 const OLD_MORNING_ITEM = 'טיפול בקלינאות תקשורת';
-const DEFAULT_MORNING = { env: 'sandbox', item: 'טיפולי שפה ודיבור בחודש {חודש}', template: 'עבור {מספר_טיפולים} טיפולים בתאריכים: {תאריכים}', vat_included: true, send_email: true };
+const DEFAULT_MORNING = { env: 'sandbox', item: 'טיפולי שפה ודיבור בחודש {חודש}', template: 'עבור {מספר_טיפולים} טיפולים בתאריכים: {תאריכים}', vat_included: true, send_email: true, send_whatsapp: true };
 const DEFAULT_SETTINGS = { version: 1, default_price: 0, clients: {}, backup_email: true, holidays: true, morning: { ...DEFAULT_MORNING } };
 // ---- חגי ישראל (לוח ישראלי, שמות בעברית) מ-hebcal.com – זהה ל-Windows
 const HOL = {};  // 'YYYY-MM-DD' → [[שם, 'yomtov'|'other']]
@@ -1489,7 +1489,14 @@ function whatsappUrl(phone, text) {
   let d = (phone || '').replace(/\D/g, ''); if (d.startsWith('0')) d = '972' + d.slice(1);
   return `https://wa.me/${d}?text=${encodeURIComponent(text)}`;
 }
-const clientPhone = (name, st) => (clientInfo(name, st).phone || '').trim();
+// הטלפון לוואטסאפ: של ההורה, ואם אין – של המטופל/ת (זהה ל-Windows)
+const clientPhone = (name, st) => { const i = clientInfo(name, st); return (i.parent_phone || i.phone || '').trim(); };
+const DEFAULT_RECEIPT_WA = 'שלום, מצורפת חשבונית מס/קבלה מס׳ {מספר_קבלה} עבור {תיאור} ({סכום}):\n{קישור}\nתודה!';
+function receiptWaText(ss, name, number, url, item) {
+  const total = ss.reduce((t, e) => t + (sessionAmount(e) || 0), 0);
+  return (S.settings.receipt_wa || DEFAULT_RECEIPT_WA).split('{מספר_קבלה}').join(String(number || '')).split('{קישור}').join(url || '')
+    .split('{תיאור}').join(name && !item.includes(name) ? `${item} של ${name}` : item).split('{סכום}').join(fmtMoney(total)).split('{שם_מטופל}').join(name || '').trim();
+}
 function quotaStatus(name, evs = allKnown(), st = S.settings) {
   const info = clientInfo(name, st), total = parseInt(info.quota, 10) || 0;
   if (!total) return null;
@@ -2402,7 +2409,7 @@ function showBulkReceipts(monthIdx = null) {
     const bad = jobs.find(j => j.missing); if (bad) { toast(`ל${bad.name} יש טיפול בלי סכום`); return; }
     const send = $('#brSend', sh).checked, total = jobs.reduce((t, j) => t + j.ss.reduce((a, e) => a + sessionAmount(e), 0), 0);
     if (!await choose('קבלות לסוף החודש', `להפיק ${jobs.length} חשבוניות מס/קבלה, סה״כ ${fmtMoney(total)}?` + (m.env === 'production' ? '\n\nאלה מסמכים רשמיים: אחרי ההפקה אי אפשר למחוק אותם, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }])) { showBulkReceipts(mi); return; }
-    const date = isoDate(today()); let ok = 0; const errors = [];
+    const date = isoDate(today()); let ok = 0; const errors = [], done = [];
     busy(true);
     try {
       for (const j of jobs) {
@@ -2415,11 +2422,13 @@ function showBulkReceipts(monthIdx = null) {
           const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: j.ss.length > 1 ? String(j.ss.length) : '' };
           for (const e of j.ss) await setStatus(e, ch);
           if (contact) await linkMorningContact(j.name, contact);
+          done.push([j.ss[0], receiptWaText(j.ss, j.name, ch.rcpt_no, ch.rcpt_url, renderItem(m.item, j.ss))]);
           ok++;
         } catch (e) { errors.push(`${j.name}: ${e.message}`); }
       }
     } finally { busy(false); }
-    alertSheet('קבלות לסוף החודש', `✓ הופקו ${ok} קבלות.` + (errors.length ? '\n\nלא הצלחתי:\n' + errors.join('\n') : ''));
+    if (done.length && m.send_whatsapp !== false) showNotify(done, `✓ הופקו ${ok} קבלות.${errors.length ? ' לא הצלחתי: ' + errors.join('; ') : ''} עכשיו שולחים להורים בוואטסאפ (או מעתיקים ושולחים בעצמך):`, 'חשבונית מס/קבלה');
+    else alertSheet('קבלות לסוף החודש', `✓ הופקו ${ok} קבלות.` + (errors.length ? '\n\nלא הצלחתי:\n' + errors.join('\n') : ''));
   };
 }
 
@@ -2866,6 +2875,7 @@ function showMorningSettings(then) {
       <p class="note">אפשר להשתמש ב: {תאריכים} {מספר_טיפולים} {שם_מטופל} {סכום}</p></div>
     <label class="check"><input type="checkbox" id="moVat" ${m.vat_included ? 'checked' : ''}>המחירים כוללים מע״מ</label>
     <label class="check"><input type="checkbox" id="moSend" ${m.send_email ? 'checked' : ''}>לשלוח את הקבלה למייל של המטופל/ת או ההורה</label>
+    <label class="check"><input type="checkbox" id="moWa" ${m.send_whatsapp !== false ? 'checked' : ''}>אחרי ההפקה לשלוח בוואטסאפ לטלפון של ההורה, עם הקישור לקבלה</label>
     <div class="actions"><button class="btn" id="moTest">בדיקת חיבור</button></div><p class="note" id="moRes" style="white-space:pre-line"></p>
     <div class="actions"><button class="btn primary" id="moSave">שמירה</button><button class="btn" id="moCancel">ביטול</button></div>`);
   const k = { ...keys };
@@ -2883,7 +2893,7 @@ function showMorningSettings(then) {
   $('#moCancel', sh).onclick = closeSheet;
   $('#moSave', sh).onclick = async () => {
     keep(); store.set('morningKeys', k); store.set('morningRelay', $('#moRelay', sh).value.trim());
-    await saveSettings({ ...S.settings, ...($('#moRelay', sh).value.trim() ? { relay_url: $('#moRelay', sh).value.trim() } : {}), morning: { env, item: $('#moItem', sh).value.trim() || DEFAULT_MORNING.item, template: $('#moTpl', sh).value.trim(), vat_included: $('#moVat', sh).checked, send_email: $('#moSend', sh).checked } });
+    await saveSettings({ ...S.settings, ...($('#moRelay', sh).value.trim() ? { relay_url: $('#moRelay', sh).value.trim() } : {}), morning: { env, item: $('#moItem', sh).value.trim() || DEFAULT_MORNING.item, template: $('#moTpl', sh).value.trim(), vat_included: $('#moVat', sh).checked, send_email: $('#moSend', sh).checked, send_whatsapp: $('#moWa', sh).checked } });
     closeSheet(); if (then) then();
   };
 }
@@ -2982,7 +2992,18 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
       const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: ss.length > 1 ? String(ss.length) : '' };
       for (const e of ss) setStatus(e, ch);
       linkMorningContact(name, contact);
-      alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.`);
+      const phone = clientPhone(name);
+      if (m.send_whatsapp !== false && phone) {
+        const text = receiptWaText(ss, name, ch.rcpt_no, ch.rcpt_url, item), wa = whatsappUrl(phone, text);
+        // הדפדפן לא מאפשר לפתוח אפליקציה אחרת בלי לחיצה – לכן לחיצה אחת על „שליחה בוואטסאפ”
+        const sh2 = openSheet(`<h3 style="margin:4px 0 6px">✓ הופקה חשבונית מס/קבלה ${esc(ch.rcpt_no)}</h3><p>על ${ss.length} טיפולים של ${esc(name)}.</p>
+          <div class="note" style="white-space:pre-wrap;background:#F7FAF9;border:1px solid var(--line2);border-radius:10px;padding:8px">${esc(text)}</div>
+          <div class="actions"><a class="btn primary" id="rcWa" href="${esc(wa)}" target="_blank" rel="noopener">💬 שליחה בוואטסאפ להורה</a><button class="btn" id="rcCopy">📋 העתקה</button></div>
+          <div class="actions"><button class="btn" id="rcClose">סגירה</button></div>`);
+        $('#rcWa', sh2).onclick = () => setTimeout(closeSheet, 300);
+        $('#rcCopy', sh2).onclick = async () => { try { await navigator.clipboard.writeText(text); $('#rcCopy', sh2).textContent = '✓ הועתק'; } catch { toast('לא הצלחתי להעתיק'); } };
+        $('#rcClose', sh2).onclick = closeSheet;
+      } else alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.` + (phone || m.send_whatsapp === false ? '' : '\n\nכדי שהקבלה תישלח גם בוואטסאפ, מוסיפים טלפון הורה (☰ ← מטופלים).'));
     } catch (e) { alertSheet('ההפקה נכשלה', e.message); }
     finally { busy(false); }
   };
@@ -2997,7 +3018,8 @@ function showPrices() {
       <div class="two" style="margin-top:6px"><input type="text" inputmode="decimal" dir="ltr" data-pi="${i}" placeholder="מחיר (ברירת מחדל)" value="${toAmount(c.price) || ''}" style="max-width:120px">
         <input type="email" dir="ltr" data-ei="${i}" placeholder="מייל של המטופל/ת או ההורה" value="${esc((c.emails || []).join(', '))}"></div>
       <input type="text" data-yi="${i}" placeholder="משלמים (למשל שמות ההורים), מופרדים בפסיק" value="${esc((c.payers || []).join(', '))}" style="margin-top:6px;width:100%;box-sizing:border-box">
-      <input type="tel" dir="ltr" data-phi="${i}" placeholder="טלפון (לוואטסאפ)" value="${esc(c.phone || '')}" style="margin-top:6px;width:100%;box-sizing:border-box">
+      <input type="tel" dir="ltr" data-ppi="${i}" placeholder="טלפון הורה (לוואטסאפ: קבלות, תזכורות)" value="${esc(c.parent_phone || '')}" style="margin-top:6px;width:100%;box-sizing:border-box">
+      <input type="tel" dir="ltr" data-phi="${i}" placeholder="טלפון של המטופל/ת (לא חובה)" value="${esc(c.phone || '')}" style="margin-top:6px;width:100%;box-sizing:border-box">
       <div class="two" style="margin-top:6px"><input type="number" min="1" inputmode="numeric" data-qi="${i}" placeholder="מכסת מפגשים" value="${parseInt(c.quota, 10) || ''}" style="max-width:130px">
         <label style="display:flex;align-items:center;gap:6px;flex:1"><span class="note">מתאריך</span><input type="date" data-qf="${i}" value="${esc(c.quota_from || '')}"></label></div>
       <label class="check"><input type="checkbox" data-ri="${i}" ${c.remind ? 'checked' : ''}>תזכורת במייל יום לפני כל טיפול</label>
@@ -3020,14 +3042,16 @@ function showPrices() {
       const invite = sh.querySelector(`[data-ii="${i}"]`).checked;
       if (invite && !emails.length) return err(`כדי לשלוח זימון ל${n} צריך מייל.`);
       const payers = parseNames(sh.querySelector(`[data-yi="${i}"]`).value);
+      const parentPhone = sh.querySelector(`[data-ppi="${i}"]`).value.trim();
       const phone = sh.querySelector(`[data-phi="${i}"]`).value.trim(), remind = sh.querySelector(`[data-ri="${i}"]`).checked;
       const quota = sh.querySelector(`[data-qi="${i}"]`).value.trim(), qfrom = sh.querySelector(`[data-qf="${i}"]`).value;
       if (remind && !emails.length) return err(`כדי לשלוח תזכורת ל${n} צריך מייל.`);
       if (quota && !(parseInt(quota, 10) > 0)) return err(`מכסת המפגשים של ${n} צריכה להיות מספר שלם.`);
       delete old.price; delete old.emails; delete old.invite; delete old.payers;
-      delete old.phone; delete old.remind; delete old.quota; delete old.quota_from;
+      delete old.phone; delete old.remind; delete old.quota; delete old.quota_from; delete old.parent_phone;
       const info = { ...old };
       if (phone) info.phone = phone;
+      if (parentPhone) info.parent_phone = parentPhone;
       if (remind) info.remind = true;
       if (quota) { info.quota = parseInt(quota, 10); if (qfrom) info.quota_from = qfrom; }
       if (payers.length) info.payers = payers;
@@ -3561,7 +3585,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
         if (price && !('price' in info) && !(name in (S.settings.clients || {}))) info.price = price;
         if (emails.length) info.emails = emails;
         if (emails.length || info.invite) { if (invite) info.invite = true; else delete info.invite; }
-        if (wait && wait.phone && !info.phone) info.phone = wait.phone;
+        if (wait && wait.phone && !info.parent_phone) info.parent_phone = wait.phone;  // בטופס הקליטה ממלא ההורה
         const wl = (S.settings.waitlist || []).filter(x => !wait || x.id !== wait.id);
         const st = { ...S.settings, waitlist: wl, locations: [...(S.settings.locations || [])], clients: { ...(S.settings.clients || {}), [name]: info } };
         const newLoc = addLocation(st, body.location);
