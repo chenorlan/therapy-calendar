@@ -1,4 +1,4 @@
-const APP_VERSION = '23';
+const APP_VERSION = '25';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -149,6 +149,9 @@ const isSession = ev => props(ev).kind !== 'event';
 const EVENT_COLOR_ID = '8';
 // ---- Morning (חשבונית ירוקה): חשבונית מס/קבלה – זהה ל-Windows
 const MORNING_URLS = { production: 'https://api.greeninvoice.co.il/api/v1', sandbox: 'https://sandbox.d.greeninvoice.co.il/api/v1' };
+// מיוני 2026 Morning עברו להתחברות OAuth בכתובת נפרדת (הכתובת הישנה /account/token חסומה) – זהה ל-Windows
+const MORNING_AUTH = { production: 'https://api.morning.co/idp/v1/oauth/token', sandbox: 'https://api.sandbox.morning.dev/idp/v1/oauth/token' };
+const MORNING_UPLOAD_URL = 'https://apigw.greeninvoice.co.il/file-upload/v1/url';
 const MORNING_PAY = { cash: 1, bank: 4, bit: 10, paybox: 10, other: 11 };
 const morningCfg = () => ({ ...DEFAULT_MORNING, ...(S.settings.morning || {}) });
 const morningKeys = env => (store.get('morningKeys', {}) || {})[env] || {};
@@ -164,13 +167,15 @@ async function relayPost(payload) {
 }
 async function morningCall(env, method, path, body, token) {
   let status, j = {};
+  const url = path.startsWith('https://') ? path : MORNING_URLS[env] + path;
   if (morningRelay()) {
-    const res = await relayPost({ kind: 'api', url: MORNING_URLS[env] + path, method, body: body || null, token: token || '' });
+    const res = await relayPost({ kind: 'api', url, method, body: body || null, token: token || '' });
     status = res.status; try { j = JSON.parse(res.text || '{}'); } catch { j = { errorMessage: res.text }; }
+    if (status === 400 && /רק ל-Morning/.test(res.text || '')) throw new Error('צריך לעדכן את הממסר לגרסה החדשה: מדביקים את הקוד החדש ב-script.google.com, ואז Deploy ← Manage deployments ← ✎ ← Version: New version ← Deploy.');
   } else {
     let r;
     try {
-      r = await fetch(MORNING_URLS[env] + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      r = await fetch(url, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
     } catch (e) {
       throw new Error('Morning חוסמים חיבור ישיר מהטלפון. כדי להשתמש ב-Morning בטלפון מגדירים ממסר: ☰ ← Morning ← „כתובת ממסר”. בינתיים אפשר להפיק מהמחשב.');
     }
@@ -187,15 +192,16 @@ async function morningToken(env) {
   if (DEMO) return 'demo';
   const k = morningKeys(env);
   let j;
-  try { j = await morningCall(env, 'POST', '/account/token', { id: k.id, secret: k.secret }); }
+  try { j = await morningCall(env, 'POST', MORNING_AUTH[env], { grant_type: 'client_credentials', client_id: k.id, client_secret: k.secret }); }
   catch (e) {
-    if (/\((400|401|404)\)/.test(e.message)) throw new Error((env === 'sandbox'
+    if (/\((400|401|403|404)\)/.test(e.message)) throw new Error((env === 'sandbox'
       ? 'המפתח לא נמצא בסביבת הבדיקות. מפתח מהחשבון הרגיל ב-Morning עובד רק בסביבה „פעיל”. לסביבת בדיקות צריך חשבון בדיקות נפרד (app.sandbox.d.greeninvoice.co.il) ומפתח משם.'
-      : 'Morning לא זיהו את המפתח. בודקים שמזהה המפתח והמפתח הסודי הועתקו במלואם, ושהמפתח פעיל.') + '\nתשובת Morning: ' + e.message.replace(/^[^:]*:\s*/, ''));
+      : 'Morning לא זיהו את המפתח. בודקים שמזהה המפתח והמפתח הסודי הועתקו במלואם, ושהמפתח פעיל.') + '\nתשובת Morning: ' + (e.message.replace('שגיאה מ-Morning ', 'קוד ').trim() || 'ללא פירוט'));
     throw e;
   }
-  if (!j.token) throw new Error('Morning לא החזירו אישור התחברות. בודקים את מזהה המפתח והסוד.');
-  return j.token;
+  const tok = j.accessToken || j.access_token || j.token;
+  if (!tok) throw new Error('Morning לא החזירו אישור התחברות. בודקים את מזהה המפתח והסוד.');
+  return tok;
 }
 async function morningMe(env) {
   // בדיקת חיבור: קבלת אישור התחברות, ואם אפשר – שם העסק
@@ -209,7 +215,7 @@ async function morningMe(env) {
 async function morningUploadExpense(env, blob, name) {
   // מסמך הוצאה (קבלה / חשבונית מספק): Morning קוראים אותו ויוצרים טיוטת הוצאה (זהה ל-Windows)
   if (DEMO) { await new Promise(r => setTimeout(r, 300)); Mock.expenses = (Mock.expenses || 0) + 1; return true; }
-  const info = await morningCall(env, 'GET', '/expenses/file', null, await morningToken(env));
+  const info = await morningCall(env, 'GET', MORNING_UPLOAD_URL + '?context=expense&data=' + encodeURIComponent(JSON.stringify({ source: 5 })), null, await morningToken(env));
   if (!info || !info.url) throw new Error('Morning לא החזירו כתובת להעלאת הקובץ.');
   if (morningRelay()) {
     const res = await relayPost({ kind: 'upload', url: info.url, fields: info.fields || null, data: await blobToBase64(blob), mime: blob.type || 'application/octet-stream', name });
