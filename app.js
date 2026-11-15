@@ -1,4 +1,4 @@
-const APP_VERSION = '28';
+const APP_VERSION = '30';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -395,6 +395,7 @@ async function loadIndex() {
     if (seq !== indexSeq) return;
     S.index = evs; renumber();
     setTimeout(maybeDaySummary, 800);
+    if (!loadIndex.alerted) { loadIndex.alerted = true; setTimeout(refreshAlerts, 2500); setTimeout(importIntake, 4000); }
   } catch { /* ignore */ }
 }
 function renumber() { S.numbers = computeNumbers(S.index); renderView.keepScroll = true; renderView(); }
@@ -639,6 +640,7 @@ async function geminiChat(system, contents) {
     if (r.status === 401 || r.status === 403) throw new Error('מפתח Gemini לא תקין או שאין לו הרשאה. אפשר להחליף אותו בתפריט ☰.');
     if (r.status === 429) throw new Error('הגעת למגבלת השימוש של Gemini. בודקים שהחיוב מופעל ב-AI Studio ומנסים שוב בעוד דקה.');
     if (!r.ok) throw new Error(`שגיאה מ-Gemini (${r.status}). ${(j.error && j.error.message) || ''}`);
+    recordUsage(model, j);
     try { return j.candidates[0].content.parts.map(x => x.text || '').join(''); } catch { throw new Error('Gemini לא החזיר תשובה.'); }
   }
   throw new Error(busy ? GEMINI_BUSY_MSG : 'לא נמצא מודל Gemini זמין.');
@@ -758,6 +760,7 @@ async function geminiRead(blob) {
     }
     if (r.status === 429) throw new Error('הגעת למגבלת השימוש של Gemini. בודקים שהחיוב מופעל ב-AI Studio ומנסים שוב בעוד דקה.');
     if (!r.ok) throw new Error(`שגיאה מ-Gemini (${r.status}).`);
+    recordUsage(model, j);
     try { return JSON.parse(j.candidates[0].content.parts[0].text); }
     catch { throw new Error('Gemini לא החזיר תשובה שאפשר לקרוא. נסו צילום ברור יותר.'); }
   }
@@ -946,7 +949,7 @@ const Inbox = {
   },
 };
 function setInboxCount(n) { const b = $('#inboxBtn'); if (!b) return; $('#inboxCount').textContent = n || ''; $('#inboxCount').hidden = !n; }
-async function checkInbox() { try { setInboxCount((await Inbox.list()).length); } catch { /* ignore */ } }
+async function checkInbox() { if (!feat('inbox')) return; try { setInboxCount((await Inbox.list()).length); } catch { /* ignore */ } }
 async function showInbox() {
   const sh = openSheet('<h3 style="margin:4px 0 6px">תיבת קלט – מסמכים לטיפול</h3><div class="spinner"></div>');
   let files;
@@ -1111,7 +1114,7 @@ function renderView() {
   else if (S.view === 'list') main.innerHTML = listHtml();
   else main.innerHTML = summaryHtml();
   bindView();
-  renderQuickBar();
+  applyFeatures();
   if (renderView.keepScroll) main.scrollTop = scroll;
   else if (S.view === 'day' || S.view === 'week') {
     const evs = [...main.querySelectorAll('.ev')];
@@ -1430,6 +1433,7 @@ function quotaText(q) {
   return t;
 }
 function quotaWarning(ev) {
+  if (!feat('quota')) return;
   const q = quotaStatus(title(ev).trim());
   if (!q || q.left > 2) return;
   const n = title(ev).trim();
@@ -1566,7 +1570,7 @@ function showQuickMark(items = unmarkedSessions(allKnown()), heading = 'סימו
   $('#qmClose', sh).onclick = closeSheet;
 }
 function maybeDaySummary() {
-  if (!S.token || !S.calendars.length || store.get('daySummary', true) === false) return;
+  if (!S.token || !S.calendars.length || store.get('daySummary', true) === false || !feat('quickmark')) return;
   if (new Date().getHours() < +(store.get('daySummaryHour', DAY_SUMMARY_HOUR) ?? DAY_SUMMARY_HOUR)) return;
   const day = isoDate(today());
   if (store.get('daySummaryShown', '') === day || !$('#sheet').hidden) return;
@@ -1581,11 +1585,22 @@ function renderQuickBar() {
   bar.hidden = !ready;
   if (!ready) return;
   const n = unmarkedSessions(allKnown()).length, w = (S.settings.waitlist || []).length;
-  bar.innerHTML = `<button class="qchip ${n ? 'warn' : ''}" id="qbMark">✔ סימון${n ? ` (${n})` : ''}</button>
-    <button class="qchip" id="qbDebts">💰 מי חייב לי</button><button class="qchip" id="qbWait">⏳ המתנה${w ? ` (${w})` : ''}</button>`;
-  $('#qbMark').onclick = () => showQuickMark();
-  $('#qbDebts').onclick = showDebts;
-  $('#qbWait').onclick = showWaitlist;
+  const al = computeAlerts().length, mk = feat('makeups') ? uniqueSessions(allKnown()).filter(makeupDue).length : 0;
+  const chips = [
+    ['alerts', al, `<button class="qchip warn" id="qbAlerts">🔔 ${al}</button>`, showAlerts],
+    ['quickmark', 1, `<button class="qchip ${n ? 'warn' : ''}" id="qbMark">✔ סימון${n ? ` (${n})` : ''}</button>`, () => showQuickMark()],
+    ['assistant', 1, '<button class="qchip" id="qbAssist">🗣 עוזרת</button>', () => showAssistant()],
+    ['clientfile', 1, '<button class="qchip" id="qbFile">📁 תיק מטופל</button>', showClientPicker],
+    ['debts', 1, '<button class="qchip" id="qbDebts">💰 מי חייב לי</button>', () => showDebts()],
+    ['makeups', mk, `<button class="qchip" id="qbMk">↺ השלמות (${mk})</button>`, showMakeups],
+    ['waitlist', 1, `<button class="qchip" id="qbWait">⏳ המתנה${w ? ` (${w})` : ''}</button>`, showWaitlist],
+    ['slots', 1, '<button class="qchip" id="qbSlot">🔎 שעה פנויה</button>', () => showSlotFinder({ onPick: sl => showNewMenu(sl[0]) })],
+    ['cancelday', 1, '<button class="qchip" id="qbCday">🤒 יום ביטול</button>', () => showCancelDay()],
+    ['bulkreceipts', feat('morning') ? 1 : 0, '<button class="qchip" id="qbBulk">🧾 קבלות לחודש</button>', () => showBulkReceipts()],
+  ].filter(c => feat(c[0]) && c[1]);
+  bar.innerHTML = chips.map(c => c[2]).join('');
+  bar.hidden = !chips.length;
+  bar.querySelectorAll('button').forEach((b, i) => b.onclick = chips[i][3]);
 }
 
 // מי חייב לי + תזכורת תשלום
@@ -1684,10 +1699,12 @@ function showWaitlist() {
       <div style="display:flex;gap:8px"><b style="flex:1">${esc(w.name)}</b><span class="note">${w.added ? dmy(parseDateOnly(w.added)) : ''}</span></div>
       ${w.phone || w.email ? `<div class="note" dir="ltr" style="text-align:right">${esc([w.phone, w.email].filter(Boolean).join(' · '))}</div>` : ''}
       ${w.location ? `<div class="note">📍 ${esc(w.location)}</div>` : ''}
+      ${(w.days || []).length || w.from ? `<div class="note">🕒 ${(w.days || []).map(i => DAY_LETTERS[i]).join(' ')} ${esc(w.from || '')}${w.to ? '–' + esc(w.to) : ''}</div>` : ''}
       ${w.note ? `<div class="note" style="white-space:pre-wrap">${esc(w.note)}</div>` : ''}
       <div class="seg" style="margin-top:6px"><button class="btn primary" data-ws="${i}">📅 קביעת טיפולים</button><button class="btn" data-we="${i}">עריכה</button><button class="btn danger" data-wd="${i}">הסרה</button></div></div>`).join('')
       : '<p class="note">הרשימה ריקה.</p>'}
-    <div class="actions"><button class="btn primary" id="wlAdd">+ הוספה</button><button class="btn" id="wlClose">סגירה</button></div>`);
+    <div class="actions"><button class="btn primary" id="wlAdd">+ הוספה</button>${feat('intake') ? '<button class="btn" id="wlForm">📝 טופס קליטה</button>' : ''}<button class="btn" id="wlClose">סגירה</button></div>`);
+  if ($('#wlForm', sh)) $('#wlForm', sh).onclick = showIntake;
   const saveList = async list => { await saveSettings({ ...S.settings, waitlist: list }); renderQuickBar(); };
   $('#wlAdd', sh).onclick = () => showWaitItem(null, saveList);
   $('#wlClose', sh).onclick = closeSheet;
@@ -1698,7 +1715,13 @@ function showWaitlist() {
       await saveList((S.settings.waitlist || []).filter(x => x.id !== w.id)); showWaitlist();
     } else showWaitlist();
   });
-  sh.querySelectorAll('[data-ws]').forEach(b => b.onclick = () => showForm({ purpose: 'client', wait: items[+b.dataset.ws] }));
+  sh.querySelectorAll('[data-ws]').forEach(b => b.onclick = () => {
+    const w = items[+b.dataset.ws];
+    if (!feat('slots')) { showForm({ purpose: 'client', wait: w }); return; }
+    showSlotFinder({ heading: `שעה ל${w.name}`, days: (w.days || []).length ? w.days : null, from: w.from || null, to: w.to || null,
+      note: `זמינות: ${(w.days || []).map(i => DAY_LETTERS[i]).join(' ') || 'לא צוינה'} ${w.from || ''}${w.to ? '–' + w.to : ''}${w.location ? ' · ' + w.location : ''}`,
+      onPick: sl => showForm({ purpose: 'client', wait: w, start: sl[0] }), onBack: showWaitlist });
+  });
 }
 function showWaitItem(w, saveList) {
   const x = w || {};
@@ -1707,6 +1730,8 @@ function showWaitItem(w, saveList) {
     <div class="field"><label>טלפון</label><input type="tel" dir="ltr" id="wiPhone" value="${esc(x.phone || '')}"></div>
     <div class="field"><label>מייל</label><input type="email" dir="ltr" id="wiEmail" value="${esc(x.email || '')}"></div>
     <div class="field"><label>מיקום</label><input type="text" id="wiLoc" list="locList" placeholder="בוחרים מהרשימה או כותבים מקום אחר" value="${esc(x.location || '')}">${locList()}</div>
+    <div class="field"><label>זמינות</label><div class="seg" style="margin:0">${DAY_LETTERS.slice(0, 6).map((l, i) => `<label class="check" style="margin:0"><input type="checkbox" data-wd2="${i}" ${(x.days || []).includes(i) ? 'checked' : ''}>${l}</label>`).join('')}</div>
+      <div class="two" style="margin-top:6px"><input type="time" id="wiFrom" value="${esc(x.from || '')}"><input type="time" id="wiTo" value="${esc(x.to || '')}"></div></div>
     <div class="field"><label>הערות</label><textarea id="wiNote" rows="3" style="width:100%;box-sizing:border-box" placeholder="גיל, סיבת הפנייה, ימים ושעות שמתאימים…">${esc(x.note || '')}</textarea></div>
     <p class="err" id="wiErr"></p>
     <div class="actions"><button class="btn primary" id="wiSave">שמירה</button><button class="btn" id="wiBack">חזרה</button></div>`);
@@ -1715,13 +1740,812 @@ function showWaitItem(w, saveList) {
     const name = $('#wiName', sh).value.trim(), email = $('#wiEmail', sh).value.trim();
     if (!name) { $('#wiErr', sh).textContent = 'צריך שם.'; return; }
     if (email && parseEmails(email)[1].length) { $('#wiErr', sh).textContent = 'המייל לא תקין.'; return; }
-    const item = { ...x, name, phone: $('#wiPhone', sh).value.trim(), email, location: $('#wiLoc', sh).value.trim(), note: $('#wiNote', sh).value.trim() };
+    const item = { ...x, name, phone: $('#wiPhone', sh).value.trim(), email, location: $('#wiLoc', sh).value.trim(), note: $('#wiNote', sh).value.trim(),
+      days: [...sh.querySelectorAll('[data-wd2]')].filter(c => c.checked).map(c => +c.dataset.wd2), from: $('#wiFrom', sh).value, to: $('#wiTo', sh).value };
     item.id = item.id || 'w' + Date.now(); item.added = item.added || isoDate(today());
     const list = (S.settings.waitlist || []).filter(y => y.id !== item.id).concat([item]);
     const st = { ...S.settings, waitlist: list, locations: [...(S.settings.locations || [])] };
     addLocation(st, item.location);
     await saveSettings(st); renderQuickBar(); showWaitlist();
   };
+}
+
+// ---- תכונות (הפעלה / כיבוי) – זהה ל-Windows
+const FEATURES = [
+  ['clientfile', '📁 תיק מטופל', 'כל הטיפולים, התשלומים וההערות של מטופל/ת במסך אחד'],
+  ['notes', '📝 מה היה בטיפול', 'הערה פרטית לכל טיפול'],
+  ['voice', '🎤 הקלטה ותמלול', 'הכתבת ההערה בקול (Gemini מתמלל)'],
+  ['summary', '📄 סיכום טיפול (AI)', 'טיוטת סיכום / דו״ח התקדמות מההערות'],
+  ['docs', '📎 מסמכים למטופל', 'הפניות, התחייבויות ואבחונים, עם תאריך תפוגה'],
+  ['quota', '🔢 מכסת מפגשים', 'כמה מפגשים אושרו וכמה נשארו'],
+  ['quickmark', '✔ סימון מהיר', 'סימון הטיפולים שעברו, וחלון בסוף היום'],
+  ['debts', '💰 מי חייב לי', 'חובות ותזכורות תשלום'],
+  ['photo', '📷 מסמך מצילום', 'קריאת אישורי תשלום והוצאות מצילום (Gemini)'],
+  ['inbox', '📥 תיבת קלט', 'מסמכים מתיקייה ב-Google Drive'],
+  ['morning', '🧾 קבלות ב-Morning', 'הפקת חשבוניות מס/קבלה'],
+  ['expenses', '📤 הוצאות ל-Morning', 'העלאת קבלות על הוצאות'],
+  ['reminders', '⏰ תזכורות למטופלים', 'מייל אוטומטי יום לפני הטיפול'],
+  ['waitlist', '⏳ רשימת המתנה', 'מי מחכה לתור'],
+  ['slots', '🔎 חיפוש שעה פנויה', 'הצעת שעות פנויות ביומן'],
+  ['cancelday', '🤒 יום ביטול', 'ביטול כל הטיפולים של יום והודעה להורים'],
+  ['makeups', '↺ פגישות השלמה', 'מעקב אחרי טיפולים שצריך להשלים'],
+  ['alerts', '🔔 התראות', 'חגים שנופלים על טיפולים, מסמכים שתוקפם נגמר, מכסות'],
+  ['ai', '🤖 שאלה ל-AI', 'שאלות על היסטוריית הטיפולים'],
+  ['usage', '💳 שימוש ב-Gemini', 'הערכת העלות החודשית ותקציב'],
+];
+const feat = k => ((S.settings.features || {})[k]) !== false;
+function showFeatures() {
+  const cur = S.settings.features || {};
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">תכונות</h3>
+    <p class="note">מסמנים אילו תכונות להציג. תכונה כבויה נעלמת מהמסכים, אבל המידע שלה לא נמחק. הבחירה זהה בטלפון ובמחשב.</p>
+    ${FEATURES.map(([k, l, d]) => `<label class="check"><input type="checkbox" data-f="${k}" ${cur[k] !== false ? 'checked' : ''}><span>${l} <span class="note">– ${d}</span></span></label>`).join('')}
+    <div class="actions"><button class="btn primary" id="ftSave">שמירה</button><button class="btn" id="ftCancel">ביטול</button></div>`);
+  $('#ftCancel', sh).onclick = closeSheet;
+  $('#ftSave', sh).onclick = async () => {
+    const f = {}; sh.querySelectorAll('[data-f]').forEach(c => { if (!c.checked) f[c.dataset.f] = false; });
+    closeSheet(); await saveSettings({ ...S.settings, features: f }); applyFeatures();
+  };
+}
+function applyFeatures() {
+  const show = (id, on) => { const el = $(id); if (el) el.style.display = on ? '' : 'none'; };
+  const ready = S.token && S.calendars.length;
+  show('#aiBtn', feat('ai')); show('#receiptBtn', feat('photo')); show('#inboxBtn', feat('inbox'));
+  if (ready) renderQuickBar();
+}
+
+// ---- שימוש ב-Gemini (הערכה לפי המחירון של Google) – זהה ל-Windows
+const GEMINI_PRICES = { lite: [0.10, 0.30, 0.40], flash: [0.30, 1.00, 2.50] }, USD_ILS = 3.7;
+let usagePending = [], usageTimer = null;
+function geminiCost(model, um) {
+  const p = GEMINI_PRICES[(model || '').includes('lite') ? 'lite' : 'flash'];
+  const prompt = +um.promptTokenCount || 0, out = (+um.candidatesTokenCount || 0) + (+um.thoughtsTokenCount || 0);
+  const audio = (um.promptTokensDetails || []).filter(d => d.modality === 'AUDIO').reduce((t, d) => t + (+d.tokenCount || 0), 0);
+  return ((prompt - audio) * p[0] + audio * p[1] + out * p[2]) / 1e6 * USD_ILS;
+}
+function recordUsage(model, j) {
+  if (!j || !j.usageMetadata) return;
+  usagePending.push(geminiCost(model, j.usageMetadata));
+  clearTimeout(usageTimer); usageTimer = setTimeout(flushUsage, 4000);
+}
+const monthKey = () => isoDate(today()).slice(0, 7);
+const usageMonth = (k = monthKey()) => ((S.settings.ai_usage || {})[k]) || { ils: 0, calls: 0 };
+async function flushUsage() {
+  if (!usagePending.length || !S.token) return;
+  const n = usagePending.length, total = usagePending.reduce((a, b) => a + b, 0); usagePending = [];
+  const st = JSON.parse(JSON.stringify(S.settings)), usage = st.ai_usage = st.ai_usage || {}, k = monthKey();
+  const cur = usage[k] = usage[k] || { ils: 0, calls: 0 }, before = cur.ils || 0;
+  cur.ils = Math.round((before + total) * 1e4) / 1e4; cur.calls = (cur.calls || 0) + n;
+  for (const old of Object.keys(usage).sort().slice(0, -12)) delete usage[old];
+  const budget = toAmount(st.ai_budget) || 0;
+  let warn = '';
+  if (budget && feat('usage')) for (const [frac, flag] of [[1, 'w100'], [0.8, 'w80']]) {
+    if (before < budget * frac && cur.ils >= budget * frac && !cur[flag]) {
+      cur[flag] = true;
+      warn = frac === 1 ? `השימוש ב-Gemini החודש עבר את התקציב (${fmtMoney(budget)}).` : `השימוש ב-Gemini החודש הגיע ל-80% מהתקציב (כ-${fmtMoney(cur.ils)} מתוך ${fmtMoney(budget)}).`;
+      break;
+    }
+  }
+  S.settings = { ...DEFAULT_SETTINGS, ...st }; store.set('settings', S.settings);
+  try { await AppData.saveSettings(S.settings); } catch { /* ignore */ }
+  if (warn) toast(warn);
+}
+function showUsage() {
+  const cur = usageMonth(), budget = toAmount(S.settings.ai_budget) || 0, left = budget - cur.ils;
+  const hist = Object.entries(S.settings.ai_usage || {}).sort().reverse().slice(0, 6);
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">שימוש ב-Gemini</h3>
+    <p><b>החודש: כ-${fmtMoney(cur.ils) || '₪0'}</b> · ${cur.calls} פעולות</p>
+    ${budget ? `<p style="${left < budget * 0.2 ? 'color:#B54708;font-weight:600' : ''}">תקציב ${fmtMoney(budget)} · נשאר כ-${fmtMoney(Math.max(left, 0)) || '₪0'}${left < 0 ? ' · ⚠ עברת את התקציב' : ''}</p>` : ''}
+    ${hist.length ? `<p class="note">חודשים אחרונים: ${hist.map(([k, v]) => `${k.slice(5)}/${k.slice(2, 4)}: ${fmtMoney(v.ils) || '₪0'}`).join(' · ')}</p>` : ''}
+    <div class="field"><label>תקציב חודשי (₪)</label><input type="text" inputmode="decimal" dir="ltr" id="usBudget" placeholder="למשל 20 (ריק = בלי תקציב)" value="${budget || ''}"></div>
+    <p class="note">זו הערכה לפי כמות הטקסט, התמונות וההקלטות שנשלחו, ולפי המחירון של Google (בשקלים, לפי דולר ≈ ₪3.7). Google לא מאפשרים לאפליקציה לקרוא את יתרת החיוב עצמה.</p>
+    <p class="note"><a href="https://aistudio.google.com/usage" target="_blank" rel="noopener">השימוש ב-AI Studio</a> · <a href="https://console.cloud.google.com/billing" target="_blank" rel="noopener">החיוב ב-Google Cloud</a></p>
+    <p class="err" id="usErr"></p>
+    <div class="actions"><button class="btn primary" id="usSave">שמירה</button><button class="btn" id="usClose">סגירה</button></div>`);
+  $('#usClose', sh).onclick = closeSheet;
+  $('#usSave', sh).onclick = async () => {
+    const t = $('#usBudget', sh).value.trim();
+    if (t && !toAmount(t)) { $('#usErr', sh).textContent = 'התקציב צריך להיות מספר.'; return; }
+    closeSheet(); await saveSettings({ ...S.settings, ai_budget: toAmount(t) || 0 });
+  };
+}
+
+// ---- תיק מטופל וסיכום טיפול
+function statusText(ev) {
+  const a = attended(ev);
+  if (a === 'yes') return 'התקיימה';
+  if (a === 'no') return 'בוטלה' + (cancelLabel(ev) ? ` (${cancelLabel(ev)})` : '');
+  return evTimes(ev).s > new Date() ? 'עתידית' : 'טרם סומן';
+}
+const clientSessions = name => uniqueSessions(allKnown()).filter(e => title(e).trim() === (name || '').trim()).sort((a, b) => evTimes(a).s - evTimes(b).s);
+const makeupDue = ev => attended(ev) === 'no' && props(ev).makeup === 'due';
+const MAKEUP_REASONS = ['sick', 'me', 'holiday'];
+function showClientPicker() {
+  const names = clientNames();
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">תיק מטופל</h3>
+    <div class="field"><input type="search" id="cpSearch" placeholder="חיפוש…"></div>
+    <div id="cpList">${names.map(n => `<button class="btn" data-cp="${esc(n)}" style="width:100%;margin:3px 0;text-align:start">${esc(n)}</button>`).join('')}</div>
+    <div class="actions"><button class="btn" id="cpClose">סגירה</button></div>`);
+  $('#cpSearch', sh).oninput = e => sh.querySelectorAll('[data-cp]').forEach(b => { b.style.display = b.dataset.cp.includes(e.target.value.trim()) ? '' : 'none'; });
+  sh.querySelectorAll('[data-cp]').forEach(b => b.onclick = () => showClientFile(b.dataset.cp));
+  $('#cpClose', sh).onclick = closeSheet;
+}
+function showClientFile(name) {
+  const ss = clientSessions(name), info = clientInfo(name), now = new Date();
+  const held = ss.filter(e => attended(e) === 'yes').length, canc = ss.filter(e => attended(e) === 'no').length;
+  const fut = ss.filter(e => evTimes(e).s > now && attended(e) !== 'no').length;
+  const debt = computeDebts(ss).find(d => d.name === name), due = ss.filter(makeupDue);
+  const loc = (ss.slice().reverse().find(e => e.location) || {}).location;
+  const facts = [`התקיימו ${held} · בוטלו ${canc} · עתידיים ${fut}`];
+  if (clientPrice(name)) facts.push('מחיר: ' + fmtMoney(clientPrice(name)));
+  if (info.phone) facts.push('טלפון: ' + ltr(esc(info.phone)));
+  if ((info.emails || []).length) facts.push('מייל: ' + esc(info.emails.join(', ')));
+  if ((info.payers || []).length) facts.push('משלמים: ' + esc(info.payers.join(', ')));
+  if (loc) facts.push('מיקום: ' + esc(loc));
+  if (feat('quota') && quotaStatus(name)) facts.push('מכסה: ' + esc(quotaText(quotaStatus(name))));
+  if (feat('debts') && debt) facts.push(`לא שולמו: ${debt.sessions.length} טיפולים${debt.total ? ' · ' + fmtMoney(debt.total) : ''}`);
+  if (feat('makeups') && due.length) facts.push(`השלמות פתוחות: ${due.length}`);
+  const row = e => { const t = evTimes(e), n = sessionNo(e), p = props(e);
+    return `<div class="card" data-open="${esc(e.id)}" style="margin:6px 0;padding:8px 10px">
+      <div style="display:flex;gap:8px"><b style="flex:1">${dmy(t.s)} · ${ltr(hm(t.s))}${n ? ` · מפגש ${n}` : ''}</b><span class="note">${esc(statusText(e))}</span></div>
+      <div class="note">${paid(e) ? '₪ ' + esc(payLabel(e) || 'שולמה') : attended(e) === 'yes' ? 'לא שולמה' : ''}${receiptIssued(e) ? ' · קבלה ' + esc(p.rcpt_no || '✓') : ''}${makeupDue(e) ? ' · ↺ השלמה' : ''}${p.makeup_for ? ' · פגישת השלמה' : ''}</div>
+      ${feat('notes') && evNote(e) ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(evNote(e))}</div>` : ''}
+      ${feat('exercises') && p.homework ? `<div class="note">📚 ${esc(p.homework)}</div>` : ''}</div>`; };
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">📁 ${esc(name)}</h3>
+    <p style="line-height:1.6">${facts.join('<br>')}</p>
+    <div class="seg">${feat('summary') ? '<button class="btn" id="cfSum">📄 סיכום טיפול (AI)</button>' : ''}${feat('docs') ? '<button class="btn" id="cfDocs">📎 מסמכים</button>' : ''}
+      ${feat('debts') && debt ? '<button class="btn" id="cfRem">📨 תזכורת תשלום</button>' : ''}${feat('makeups') && due.length ? '<button class="btn" id="cfMk">↺ קביעת השלמה</button>' : ''}${feat('export') ? '<button class="btn" id="cfPdf">🖨 ייצוא ל-PDF</button>' : ''}</div>
+    ${(() => { const up = ss.filter(e => evTimes(e).s > now && attended(e) !== 'no').slice(0, 3);
+      return up.length ? `<div class="sec">הטיפולים הקרובים</div>${up.map(row).join('')}` : ''; })()}
+    <div class="sec">טיפולים שהיו (מהחדש לישן)</div>${ss.filter(e => evTimes(e).s <= now || attended(e) === 'no').reverse().map(row).join('') || '<p class="note">אין עדיין.</p>'}
+    <div class="actions"><button class="btn" id="cfClose">סגירה</button></div>`);
+  sh.querySelectorAll('[data-open]').forEach(c => c.onclick = () => { const e = allKnown().find(x => x.id === c.dataset.open); if (e) showDetails(e); });
+  const on = (id, fn) => { const b = $(id, sh); if (b) b.onclick = fn; };
+  on('#cfSum', () => showSummary(name)); on('#cfDocs', () => showClientDocs(name));
+  on('#cfRem', () => showPayReminder(debt, true)); on('#cfPdf', () => exportClient(name)); on('#cfMk', () => scheduleMakeup(due[0]));
+  $('#cfClose', sh).onclick = closeSheet;
+}
+const SUMMARY_AUDIENCES = [['kupa', 'קופת חולים / גורם מממן', 'דו״ח התקדמות לקופת חולים'], ['school', 'בית ספר / גן', 'סיכום טיפול לצוות החינוכי'],
+  ['parents', 'הורים', 'סיכום טיפול להורים, בשפה פשוטה וחמה'], ['general', 'כללי', 'סיכום טיפול מקצועי']];
+const SUMMARY_SYSTEM = `את/ה עוזר/ת לקלינאית תקשורת לכתוב {doc}.
+כתוב/י בעברית, בגוף ראשון של הקלינאית, בשפה מקצועית{tone}.
+הסתמך/י רק על המידע שקיבלת (רשימת המפגשים וההערות). אל תמציא/י אבחנות, ציונים או פרטים שלא נכתבו.
+במקום שבו חסר מידע חשוב, השאר/י סוגריים מרובעים עם הסבר, למשל [גיל המטופל/ת].
+מבנה: פרטים (שם, תקופת הטיפול, מספר המפגשים שהתקיימו ושבוטלו), מטרות הטיפול (רק אם עולות מההערות),
+מהלך הטיפול, התקדמות, והמלצות להמשך. בלי כותרת „טיוטה”, בלי הקדמה ובלי סיכום של מה שעשית.`;
+function summaryPrompt(name, ss, aud, extra) {
+  const doc = (SUMMARY_AUDIENCES.find(a => a[0] === aud) || [])[2] || 'סיכום טיפול';
+  const tone = aud === 'parents' ? ', פשוטה וחמה, בלי מונחים מקצועיים לא מוסברים' : '';
+  const lines = [`שם: ${name}`, `מפגשים שהתקיימו: ${ss.filter(e => attended(e) === 'yes').length}, בוטלו: ${ss.filter(e => attended(e) === 'no').length}`];
+  for (const e of ss) { const n = sessionNo(e); lines.push(`${dmy(evTimes(e).s)} | ${n ? 'מפגש ' + n : 'מפגש'} | ${statusText(e)}${evNote(e) ? ' | ' + evNote(e) : ''}`); }
+  if (extra) lines.push(`הנחיות נוספות מהקלינאית: ${extra}`);
+  return [SUMMARY_SYSTEM.replace('{doc}', doc).replace('{tone}', tone), lines.join('\n')];
+}
+function showSummary(name) {
+  const info = clientInfo(name);
+  const from = info.quota_from || isoDate(addDays(today(), -90));
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">סיכום טיפול – ${esc(name)}</h3>
+    <div class="two"><div class="field"><label>מתאריך</label><input type="date" id="smFrom" value="${from}"></div>
+      <div class="field"><label>עד תאריך</label><input type="date" id="smTo" value="${isoDate(today())}"></div></div>
+    <div class="field"><label>בשביל</label><select id="smAud">${SUMMARY_AUDIENCES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+    <div class="field"><label>הנחיות (לא חובה)</label><input type="text" id="smExtra" placeholder="למשל „להדגיש את ההתקדמות בשטף”"></div>
+    <button class="btn primary" id="smGen" style="width:100%">✨ יצירת טיוטה</button>
+    <p class="note" id="smInfo"></p>
+    <textarea id="smText" rows="12" style="width:100%;box-sizing:border-box" placeholder="כאן תופיע הטיוטה. אפשר לערוך אותה לפני ההעתקה או השמירה."></textarea>
+    <div class="actions"><button class="btn" id="smCopy">העתקה</button><button class="btn" id="smSave">💾 שמירה כ-Google Doc</button></div>
+    <p class="note">ההערות נשלחות ל-Gemini ליצירת הטיוטה. חשוב לקרוא ולתקן לפני ששולחים לגורם חיצוני.</p>
+    <div class="actions"><button class="btn" id="smBack">חזרה לתיק</button></div>`);
+  const info2 = $('#smInfo', sh);
+  $('#smGen', sh).onclick = async () => {
+    const a = $('#smFrom', sh).value, b = $('#smTo', sh).value;
+    const ss = clientSessions(name).filter(e => { const d = isoDate(evTimes(e).s); return d >= a && d <= b; });
+    if (!ss.length) { info2.textContent = 'אין טיפולים בתקופה הזו.'; return; }
+    if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(() => showSummary(name)); return; }
+    const withNotes = ss.filter(evNote).length;
+    info2.textContent = `${ss.length} טיפולים בתקופה, ל-${withNotes} מהם יש הערה. Gemini כותב…`;
+    const [sys, data] = summaryPrompt(name, ss, $('#smAud', sh).value, $('#smExtra', sh).value.trim());
+    try {
+      busy(true);
+      const text = DEMO ? `סיכום טיפול – ${name}\n\n${data}` : await geminiChat(sys, [{ role: 'user', parts: [{ text: data }] }]);
+      $('#smText', sh).value = text.trim();
+      info2.textContent = `✓ הטיוטה מוכנה (${ss.length} טיפולים, ${withNotes} עם הערה). כדאי לקרוא ולתקן.` + (withNotes ? '' : ' שימי לב: אין הערות, ולכן הסיכום כללי מאוד.');
+    } catch (e) { info2.textContent = ''; handleErr(e); } finally { busy(false); }
+  };
+  $('#smCopy', sh).onclick = async () => { try { await navigator.clipboard.writeText($('#smText', sh).value); toast('✓ הועתק'); } catch { toast('לא הצלחתי להעתיק'); } };
+  $('#smSave', sh).onclick = async () => {
+    const text = $('#smText', sh).value.trim(); if (!text) return;
+    try { busy(true); const f = await ClientDocs.createTextDoc(name, `סיכום טיפול – ${name} – ${dmy(today()).replace(/\//g, '.')}`, text); toast('✓ נשמר ב-Google Drive'); if (f.webViewLink && f.webViewLink !== '#') window.open(f.webViewLink, '_blank'); }
+    catch (e) { handleErr(e); } finally { busy(false); }
+  };
+  $('#smBack', sh).onclick = () => showClientFile(name);
+}
+
+// ---- מסמכים למטופל: יומן הטיפולים / מטופלים / <שם> (זהה ל-Windows)
+const DOC_TYPES = [['referral', 'הפניה'], ['approval', 'התחייבות / אישור טיפולים'], ['assessment', 'אבחון'], ['report', 'סיכום / דו״ח'], ['other', 'אחר']];
+const docTypeLabel = k => (DOC_TYPES.find(d => d[0] === k) || [0, 'אחר'])[1];
+const ClientDocs = {
+  async folder(name) {
+    const root = await AppData.folder('מטופלים', await AppData.app(), 'clientsFolder');
+    const safe = (name || '').replace(/\//g, '-').replace(/'/g, '׳').trim() || 'ללא שם';
+    return AppData.folder(safe, root, 'clientFolder:' + safe);
+  },
+  async list(name = null) {
+    if (DEMO) return (Mock.docs || []).filter(f => !name || f.appProperties.client === name);
+    let q = "appProperties has { key='tc' and value='client_doc' } and trashed = false";
+    if (name) q += ` and appProperties has { key='client' and value='${name.trim().replace(/'/g, "\\'")}' }`;
+    let out = [], token = '';
+    do {
+      const r = await gfetch('https://www.googleapis.com/drive/v3/files?' + qs({ q, spaces: 'drive', pageSize: 200, ...(token ? { pageToken: token } : {}), fields: 'nextPageToken,files(id,name,mimeType,webViewLink,createdTime,appProperties)' }));
+      out = out.concat(r.files || []); token = r.nextPageToken || '';
+    } while (token);
+    return out;
+  },
+  async upload(name, file, docType, expiry) {
+    const appProperties = { tc: 'client_doc', client: name.trim(), doc_type: docType, expiry: expiry || '' };
+    if (DEMO) { const f = { id: 'doc' + Date.now(), name: file.name, webViewLink: '#', createdTime: new Date().toISOString(), appProperties }; (Mock.docs = Mock.docs || []).push(f); return f; }
+    return multipartUpload({ name: file.name, parents: [await ClientDocs.folder(name)], appProperties }, file);
+  },
+  async setProps(id, appProperties) {
+    if (DEMO) { const f = (Mock.docs || []).find(x => x.id === id); if (f) f.appProperties = appProperties; return; }
+    return gfetch(`https://www.googleapis.com/drive/v3/files/${enc(id)}?fields=id`, { method: 'PATCH', json: { appProperties } });
+  },
+  async trash(id) {
+    if (DEMO) { Mock.docs = (Mock.docs || []).filter(x => x.id !== id); return; }
+    return gfetch(`https://www.googleapis.com/drive/v3/files/${enc(id)}?fields=id`, { method: 'PATCH', json: { trashed: true } });
+  },
+  async createTextDoc(name, docTitle, text) {
+    const appProperties = { tc: 'client_doc', client: name.trim(), doc_type: 'report', expiry: '' };
+    if (DEMO) { const f = { id: 'doc' + Date.now(), name: docTitle, webViewLink: '#', createdTime: new Date().toISOString(), appProperties }; (Mock.docs = Mock.docs || []).push(f); return f; }
+    return multipartUpload({ name: docTitle, mimeType: 'application/vnd.google-apps.document', parents: [await ClientDocs.folder(name)], appProperties }, new Blob([text], { type: 'text/plain' }));
+  },
+};
+let clientDocsCache = [];
+async function showClientDocs(name) {
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">📎 מסמכים – ${esc(name)}</h3><div id="dcList"><div class="spinner"></div></div>
+    <div class="sec">העלאת מסמך</div>
+    <div class="field"><input type="file" id="dcFile" accept="image/*,application/pdf,.doc,.docx"></div>
+    <div class="field"><label>סוג</label><select id="dcType">${DOC_TYPES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div>
+    <div class="field"><label>תוקף עד (לא חובה – תקבלי התראה חודש לפני)</label><input type="date" id="dcExp"></div>
+    <div class="actions"><button class="btn primary" id="dcUp">⬆ העלאה</button><button class="btn" id="dcBack">חזרה לתיק</button></div>
+    <p class="note">המסמכים נשמרים ב-Google Drive, בתיקייה „יומן הטיפולים ← מטופלים ← ${esc(name)}”.</p>`);
+  $('#dcBack', sh).onclick = () => showClientFile(name);
+  $('#dcType', sh).onchange = e => { if (e.target.value === 'approval' && !$('#dcExp', sh).value) $('#dcExp', sh).value = isoDate(addDays(today(), 180)); };
+  $('#dcUp', sh).onclick = async () => {
+    const f = $('#dcFile', sh).files[0]; if (!f) { toast('בוחרים קובץ'); return; }
+    try { busy(true); await ClientDocs.upload(name, f, $('#dcType', sh).value, $('#dcExp', sh).value); toast('✓ המסמך הועלה'); refreshAlerts(); showClientDocs(name); }
+    catch (e) { handleErr(e); } finally { busy(false); }
+  };
+  let docs = [];
+  try { docs = (await ClientDocs.list(name)).sort((a, b) => (b.createdTime || '').localeCompare(a.createdTime || '')); }
+  catch (e) { $('#dcList', sh).innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const soon = isoDate(addDays(today(), 30)), now = isoDate(today());
+  $('#dcList', sh).innerHTML = docs.length ? docs.map((f, i) => { const ap = f.appProperties || {};
+    return `<div class="card" style="margin:6px 0;padding:8px 10px"><b>${esc(f.name)}</b>
+      <div class="note">${docTypeLabel(ap.doc_type)}${ap.expiry ? ` · תוקף עד ${dmy(parseDateOnly(ap.expiry))}${ap.expiry < now ? ' ⚠ פג' : ap.expiry <= soon ? ' ⚠ בקרוב' : ''}` : ''} · ${(f.createdTime || '').slice(0, 10)}</div>
+      <div class="seg" style="margin:6px 0 0"><button class="btn" data-do="${i}">פתיחה</button><button class="btn" data-de="${i}">תוקף…</button><button class="btn danger" data-dd="${i}">מחיקה</button></div></div>`; }).join('')
+    : '<p class="note">אין עדיין מסמכים.</p>';
+  sh.querySelectorAll('[data-do]').forEach(b => b.onclick = () => { const f = docs[+b.dataset.do]; if (f.webViewLink && f.webViewLink !== '#') window.open(f.webViewLink, '_blank'); });
+  sh.querySelectorAll('[data-de]').forEach(b => b.onclick = async () => {
+    const f = docs[+b.dataset.de], ap = { ...(f.appProperties || {}) };
+    const v = prompt('תוקף עד (YYYY-MM-DD), או ריק בלי תוקף:', ap.expiry || isoDate(addDays(today(), 180)));
+    if (v === null) return;
+    if (v.trim() && !/^\d{4}-\d{2}-\d{2}$/.test(v.trim())) { toast('תאריך בצורה 2026-12-31'); return; }
+    ap.expiry = v.trim();
+    try { busy(true); await ClientDocs.setProps(f.id, ap); refreshAlerts(); showClientDocs(name); } catch (e) { handleErr(e); } finally { busy(false); }
+  });
+  sh.querySelectorAll('[data-dd]').forEach(b => b.onclick = async () => {
+    const f = docs[+b.dataset.dd];
+    if (!await choose('מחיקה', `למחוק את „${f.name}”? (הוא יעבור לסל המחזור של Drive)`, [{ label: 'מחיקה', value: true, cls: 'danger' }])) { showClientDocs(name); return; }
+    try { busy(true); await ClientDocs.trash(f.id); refreshAlerts(); } catch (e) { handleErr(e); } finally { busy(false); showClientDocs(name); }
+  });
+}
+
+// ---- חיפוש שעה פנויה (זהה ל-Windows)
+const DEFAULT_WORK = { days: [0, 1, 2, 3, 4], from: '08:00', to: '19:00', minutes: 45 };
+const DAY_LETTERS = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
+const holidayBlock = d => holidaysOn(d).some(([n, k]) => k === 'yomtov' || n.includes('עצמאות'));
+function findFreeSlots(evs, days, from, to, minutes, weeks = 3, limit = 80) {
+  const now = new Date(), out = [];
+  const busyList = evs.filter(e => !evTimes(e).allDay && attended(e) !== 'no' && e.status !== 'cancelled').map(e => [evTimes(e).s, evTimes(e).e]).sort((a, b) => a[0] - b[0]);
+  const [h1, m1] = from.split(':').map(Number), [h2, m2] = to.split(':').map(Number), len = minutes * 60000;
+  const round = new Date(now); round.setSeconds(0, 0); round.setMinutes(Math.ceil(round.getMinutes() / 15) * 15);
+  for (let i = 0; i < weeks * 7; i++) {
+    const d = addDays(today(), i);
+    if (!days.includes(d.getDay()) || holidayBlock(d)) continue;
+    const ws = new Date(d); ws.setHours(h1, m1, 0, 0); const we = new Date(d); we.setHours(h2, m2, 0, 0);
+    if (we <= now) continue;
+    let cur = new Date(Math.max(ws, round));
+    for (const [bs, be] of busyList.filter(b => b[1] > ws && b[0] < we).concat([[we, we]])) {
+      const gapEnd = new Date(Math.min(bs, we));
+      if (gapEnd - cur >= len) {
+        let t = new Date(cur), n = 0;
+        while (t.getTime() + len <= gapEnd.getTime() && n < 4) { out.push([new Date(t), new Date(t.getTime() + len), gapEnd]); t = new Date(t.getTime() + (minutes <= 30 ? 30 : minutes) * 60000); n++; }
+      }
+      if (be > cur) cur = new Date(be);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+function showSlotFinder({ heading = 'חיפוש שעה פנויה', minutes = null, days = null, from = null, to = null, note = '', onPick, onBack = null }) {
+  const w = { ...DEFAULT_WORK, ...(S.settings.work_hours || {}) };
+  ensureHolidays([today(), addDays(today(), 60)]);
+  const st = { days: days || w.days, from: from || w.from, to: to || w.to, minutes: +(minutes || w.minutes), weeks: 3 };
+  const times = []; for (let h = 7; h < 23; h++) for (const m of [0, 30]) times.push(pad(h) + ':' + pad(m));
+  const draw = () => {
+    const slots = findFreeSlots(allKnown(), st.days, st.from, st.to, st.minutes, st.weeks);
+    const sh = openSheet(`<h3 style="margin:4px 0 6px">${esc(heading)}</h3>${note ? `<p class="note">${esc(note)}</p>` : ''}
+      <div class="seg">${DAY_LETTERS.slice(0, 6).map((l, i) => `<button class="btn ${st.days.includes(i) ? 'on' : ''}" data-sd="${i}" style="min-width:40px">${l}</button>`).join('')}</div>
+      <div class="two"><div class="field"><label>משעה</label><select id="sfFrom">${times.map(t => `<option ${t === st.from ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+        <div class="field"><label>עד</label><select id="sfTo">${times.map(t => `<option ${t === st.to ? 'selected' : ''}>${t}</option>`).join('')}</select></div></div>
+      <div class="two"><div class="field"><label>אורך</label><select id="sfLen">${[30, 40, 45, 50, 60, 90].map(m => `<option value="${m}" ${m === st.minutes ? 'selected' : ''}>${m} דק׳</option>`).join('')}</select></div>
+        <div class="field"><label>טווח</label><select id="sfWeeks">${[1, 2, 3, 4, 6, 8].map(x => `<option value="${x}" ${x === st.weeks ? 'selected' : ''}>${x === 1 ? 'שבוע' : x + ' שבועות'}</option>`).join('')}</select></div></div>
+      <label class="check"><input type="checkbox" id="sfSave">לשמור כשעות העבודה הקבועות שלי</label>
+      <div class="sec">${slots.length ? slots.length + ' אפשרויות' : 'לא נמצאו שעות פנויות. אפשר להרחיב ימים, שעות או טווח.'}</div>
+      ${slots.map(([s, e, g], i) => `<button class="btn" data-sl="${i}" style="width:100%;margin:3px 0;text-align:start">יום ${DAYS[s.getDay()]} ${dmy(s).slice(0, 5)} · ${ltr(hm(s) + '–' + hm(e))} <span class="note">(פנוי עד ${hm(g)})</span></button>`).join('')}
+      <div class="actions"><button class="btn" id="sfBack">${onBack ? 'חזרה' : 'סגירה'}</button></div>`);
+    sh.querySelectorAll('[data-sd]').forEach(b => b.onclick = () => { const i = +b.dataset.sd; st.days = st.days.includes(i) ? st.days.filter(x => x !== i) : st.days.concat([i]); draw(); });
+    $('#sfFrom', sh).onchange = e => { st.from = e.target.value; draw(); };
+    $('#sfTo', sh).onchange = e => { st.to = e.target.value; draw(); };
+    $('#sfLen', sh).onchange = e => { st.minutes = +e.target.value; draw(); };
+    $('#sfWeeks', sh).onchange = e => { st.weeks = +e.target.value; draw(); };
+    $('#sfBack', sh).onclick = () => (onBack ? onBack() : closeSheet());
+    sh.querySelectorAll('[data-sl]').forEach(b => b.onclick = async () => {
+      if ($('#sfSave', sh).checked) await saveSettings({ ...S.settings, work_hours: { days: st.days, from: st.from, to: st.to, minutes: st.minutes } });
+      onPick(slots[+b.dataset.sl]);
+    });
+  };
+  draw();
+}
+
+// ---- פגישות השלמה
+function showMakeups() {
+  const due = uniqueSessions(allKnown()).filter(makeupDue).sort((a, b) => evTimes(a).s - evTimes(b).s);
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">↺ פגישות השלמה</h3><p class="note">טיפולים שבוטלו וצריך להשלים:</p>
+    ${due.map((e, i) => `<div class="card" style="margin:6px 0;padding:8px 10px"><b>${esc(title(e))}</b> <span class="note">${dmy(evTimes(e).s)}${cancelLabel(e) ? ' · ' + esc(cancelLabel(e)) : ''}</span>
+      <div class="seg" style="margin:6px 0 0"><button class="btn primary" data-mk="${i}">🔎 קביעת השלמה</button><button class="btn" data-mn="${i}">אין צורך</button></div></div>`).join('') || '<p>אין השלמות פתוחות. ✓</p>'}
+    <div class="actions"><button class="btn" id="mkClose">סגירה</button></div>`);
+  sh.querySelectorAll('[data-mk]').forEach(b => b.onclick = () => scheduleMakeup(due[+b.dataset.mk], showMakeups));
+  sh.querySelectorAll('[data-mn]').forEach(b => b.onclick = async () => { await setStatus(due[+b.dataset.mn], { makeup: '' }); showMakeups(); });
+  $('#mkClose', sh).onclick = closeSheet;
+}
+function scheduleMakeup(ev, onBack = null) {
+  const t = evTimes(ev), minutes = Math.max(15, Math.round((t.e - t.s) / 60000)), name = title(ev).trim();
+  const create = async start => {
+    const end = new Date(start.getTime() + minutes * 60000), tz = currentTz();
+    if (!await choose('פגישת השלמה', `לקבוע פגישת השלמה ל${name} ביום ${DAYS[start.getDay()]} ${dmy(start).slice(0, 5)} בשעה ${hm(start)}?`, [{ label: 'כן, לקבוע', value: true, cls: 'primary' }])) { if (onBack) onBack(); else closeSheet(); return; }
+    const p = { makeup_for: ev.id }; if (props(ev).price) p.price = props(ev).price;
+    const body = { summary: name, start: { dateTime: localStr(start), timeZone: tz }, end: { dateTime: localStr(end), timeZone: tz }, extendedProperties: { private: p } };
+    if (ev.location) body.location = ev.location;
+    if (ev.colorId && ev.colorId !== '8') body.colorId = ev.colorId;
+    const emails = clientInvites(name) ? clientEmails(name) : [];
+    if (emails.length) body.attendees = emails.map(email => ({ email }));
+    try {
+      busy(true);
+      const created = await G.insert(ev._calendar_id, body, !!emails.length);
+      await setStatus(ev, { makeup: 'done', makeup_ev: (created && created.id) || '' });
+      closeSheet(); toast(`✓ נקבעה פגישת השלמה ל${name}`); changed();
+    } catch (e) { handleErr(e); } finally { busy(false); }
+  };
+  if (feat('slots')) showSlotFinder({ heading: `השלמה ל${name}`, minutes, note: `פגישת השלמה לטיפול שבוטל ב-${dmy(t.s)}. בוחרים שעה פנויה:`, onPick: s => create(s[0]), onBack });
+  else {
+    const sh = openSheet(`<h3 style="margin:4px 0 6px">מועד פגישת ההשלמה – ${esc(name)}</h3>
+      <div class="two"><div class="field"><label>תאריך</label><input type="date" id="mkD" value="${isoDate(addDays(today(), 1))}"></div>
+      <div class="field"><label>שעה</label>${timeInput('mkT', t.s)}</div></div>
+      <div class="actions"><button class="btn primary" id="mkOk">המשך</button><button class="btn" id="mkNo">ביטול</button></div>`);
+    $('#mkNo', sh).onclick = () => (onBack ? onBack() : closeSheet());
+    $('#mkOk', sh).onclick = () => create(fromInputs($('#mkD', sh).value, $('#mkT', sh).value));
+  }
+}
+
+// ---- יום ביטול
+const DEFAULT_CANCEL_MSG = 'שלום, לצערי הטיפול של {שם_מטופל} ב{יום} {תאריך} בשעה {שעה} מבוטל. אחזור אליכם לתיאום מועד השלמה. סליחה על אי הנוחות!';
+const renderCancelMsg = (tpl, ev) => { const s = evTimes(ev).s; return tpl.split('{שם_מטופל}').join(title(ev).trim()).split('{יום}').join('יום ' + DAYS[s.getDay()]).split('{תאריך}').join(dmy(s).slice(0, 5)).split('{שעה}').join(hm(s)); };
+function showCancelDay(day = today()) {
+  const items = uniqueSessions(allKnown()).filter(e => canEdit(e) && sameDay(evTimes(e).s, day) && attended(e) !== 'no').sort((a, b) => evTimes(a).s - evTimes(b).s);
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">🤒 יום ביטול</h3>
+    <div class="field"><label>היום שמתבטל</label><input type="date" id="cdDay" value="${isoDate(day)}"></div>
+    <div class="field"><label>סיבה</label><select id="cdReason">${['sick', 'me', 'holiday', 'other'].map(k => `<option value="${k}">${CANCEL_REASONS.find(r => r[0] === k)[1]}</option>`).join('')}</select>
+      <input type="text" id="cdNote" placeholder="פירוט (לא חובה)" style="margin-top:6px"></div>
+    <div class="sec">הטיפולים שיבוטלו</div>
+    ${items.map((e, i) => `<label class="check"><input type="checkbox" data-cd="${i}" checked>${ltr(hm(evTimes(e).s))} ${esc(title(e))}</label>`).join('') || '<p class="note">אין טיפולים ביום הזה.</p>'}
+    ${feat('makeups') ? '<label class="check"><input type="checkbox" id="cdMk" checked>לסמן שצריך פגישת השלמה</label>' : ''}
+    <div class="field"><label>ההודעה להורים (אפשר לערוך)</label><textarea id="cdMsg" rows="4" style="width:100%;box-sizing:border-box">${esc(S.settings.cancel_message || DEFAULT_CANCEL_MSG)}</textarea>
+      <p class="note">אפשר להשתמש ב: {שם_מטופל} {יום} {תאריך} {שעה}. אחרי הביטול נפתח מסך לשליחת ההודעות.</p></div>
+    <div class="actions"><button class="btn danger" id="cdGo" ${items.length ? '' : 'disabled'}>ביטול הטיפולים</button><button class="btn" id="cdClose">סגירה</button></div>`);
+  $('#cdDay', sh).onchange = e => { if (e.target.value) showCancelDay(parseDateOnly(e.target.value)); };
+  $('#cdClose', sh).onclick = closeSheet;
+  $('#cdGo', sh).onclick = async () => {
+    const chosen = items.filter((_, i) => sh.querySelector(`[data-cd="${i}"]`).checked);
+    if (!chosen.length) { toast('לא נבחרו טיפולים'); return; }
+    const reason = $('#cdReason', sh).value, note = $('#cdNote', sh).value.trim(), tpl = $('#cdMsg', sh).value.trim() || DEFAULT_CANCEL_MSG;
+    const mk = feat('makeups') && $('#cdMk', sh).checked;
+    if (tpl !== (S.settings.cancel_message || DEFAULT_CANCEL_MSG)) saveSettings({ ...S.settings, cancel_message: tpl });
+    for (const ev of chosen) setStatus(ev, { attended: 'no', cancel_reason: reason, cancel_note: note, ...(feat('makeups') ? { makeup: mk ? 'due' : '' } : {}) });
+    showNotify(chosen.map(ev => [ev, renderCancelMsg(tpl, ev)]));
+  };
+}
+function showNotify(items) {
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">הודעה להורים</h3><p>✓ הטיפולים סומנו כמבוטלים. עכשיו שולחים הודעה:</p>
+    ${items.map(([ev], i) => { const n = title(ev).trim(); return `<div class="menu-item"><span style="flex:1">${esc(n)}</span><button class="btn" data-nw="${i}">💬 וואטסאפ</button><button class="btn" data-nm="${i}" ${clientEmails(n).length ? '' : 'disabled'}>✉ מייל</button></div>`; }).join('')}
+    <div class="actions"><button class="btn" id="ntAll">✉ מייל לכל מי שיש לו מייל</button><button class="btn primary" id="ntDone">סיום</button></div>`);
+  const mail = async (i, b) => { const [ev, text] = items[i], n = title(ev).trim(), em = clientEmails(n); if (!em.length) return;
+    try { await sendPlainEmail(em.join(', '), `ביטול טיפול – ${n}`, text); if (b) b.textContent = '✓ נשלח'; } catch (e) { handleErr(e); } };
+  sh.querySelectorAll('[data-nw]').forEach(b => b.onclick = () => { const [ev, text] = items[+b.dataset.nw]; window.open(whatsappUrl(clientPhone(title(ev).trim()), text), '_blank'); b.textContent = '✓ נפתח'; });
+  sh.querySelectorAll('[data-nm]').forEach(b => b.onclick = () => mail(+b.dataset.nm, b));
+  $('#ntAll', sh).onclick = async () => { busy(true); try { for (let i = 0; i < items.length; i++) await mail(i, sh.querySelector(`[data-nm="${i}"]`)); toast('✓ נשלחו המיילים'); } finally { busy(false); } };
+  $('#ntDone', sh).onclick = closeSheet;
+}
+
+// ---- התראות: חגים שנופלים על טיפולים, מסמכים שתוקפם נגמר, מכסות שנגמרות (זהה ל-Windows)
+const holidayClash = d => { for (const [n, k] of holidaysOn(d)) if (k === 'yomtov' || n.includes('עצמאות') || n.startsWith('ערב ')) return n; return null; };
+function computeAlerts() {
+  if (!feat('alerts')) return [];
+  const now = new Date(), until = new Date(now.getTime() + 45 * 864e5), dismissed = new Set(S.settings.dismissed_alerts || []), out = [];
+  for (const e of uniqueSessions(allKnown())) {
+    const s = evTimes(e).s;
+    if (s < now || s > until || attended(e) === 'no' || !canEdit(e)) continue;
+    const h = holidayClash(s), key = 'hol:' + e.id;
+    if (h && !dismissed.has(key)) out.push({ key, kind: 'holiday', ev: e, text: `${dmy(s).slice(0, 5)} ${ltr(hm(s))} · ${title(e)} – ${h}` });
+  }
+  if (feat('docs')) {
+    const soon = isoDate(addDays(today(), 30)), td = isoDate(today());
+    for (const f of clientDocsCache) {
+      const ap = f.appProperties || {}; if (!ap.expiry) continue;
+      const key = `doc:${f.id}:${ap.expiry}`;
+      if (ap.expiry <= soon && !dismissed.has(key)) out.push({ key, kind: 'doc', doc: f, text: `${ap.client || ''} · ${f.name} – ${ap.expiry < td ? 'התוקף נגמר ב-' : 'בתוקף עד '}${dmy(parseDateOnly(ap.expiry))}` });
+    }
+  }
+  const upcoming = {}, recent = new Set();
+  for (const e of uniqueSessions(allKnown())) {
+    const s = evTimes(e).s, n = title(e).trim();
+    if (s > now && attended(e) !== 'no' && canEdit(e)) (upcoming[n] = upcoming[n] || []).push(e);
+    else if (s <= now && s >= addDays(now, -21)) recent.add(n);
+  }
+  for (const [n, evs] of Object.entries(upcoming).sort()) {
+    evs.sort((a, b) => evTimes(a).s - evTimes(b).s);
+    const last = evs[evs.length - 1];
+    if (evs.length <= 2 && recent.has(n) && last.recurringEventId) {
+      const key = `series:${last.recurringEventId}:${isoDate(evTimes(last).s)}`;
+      if (!dismissed.has(key)) out.push({ key, kind: 'series', ev: last, client: n, text: `${n} · נשארו ${evs.length} טיפולים בסדרה (האחרון ב-${dmy(evTimes(last).s).slice(0, 5)})` });
+    }
+  }
+  if (feat('quota')) for (const name of Object.keys(S.settings.clients || {}).sort()) {
+    const q = quotaStatus(name); if (!q) continue;
+    const key = `quota:${name}:${q.quota}:${q.from}:${Math.max(q.left, 0)}`;
+    if (q.left <= 2 && !dismissed.has(key)) out.push({ key, kind: 'quota', client: name, text: `${name} · מכסה: ${quotaText(q)}` });
+  }
+  return out;
+}
+async function refreshAlerts() {
+  if (!S.token || !feat('alerts')) return;
+  ensureHolidays([today(), addDays(today(), 60)]);
+  if (feat('docs')) { try { clientDocsCache = await ClientDocs.list(); } catch { /* ignore */ } }
+  renderQuickBar();
+  const day = isoDate(today());
+  if (store.get('alertsShown', '') !== day && $('#sheet').hidden && computeAlerts().length) { store.set('alertsShown', day); showAlerts(); }
+}
+function showAlerts() {
+  const alerts = computeAlerts();
+  const heads = { holiday: '🕎 טיפולים שנופלים על חג או ערב חג', series: '🔁 סדרות טיפולים שנגמרות', doc: '📎 מסמכים שתוקפם נגמר או עומד להיגמר', quota: '🔢 מכסות שנגמרות' };
+  let h = '<h3 style="margin:4px 0 6px">🔔 התראות</h3>';
+  for (const kind of ['holiday', 'series', 'doc', 'quota']) {
+    const items = alerts.filter(a => a.kind === kind); if (!items.length) continue;
+    h += `<div class="sec">${heads[kind]}</div>` + items.map(a => { const i = alerts.indexOf(a);
+      return `<div class="card" style="margin:6px 0;padding:8px 10px"><div>${esc(a.text)}</div><div class="seg" style="margin:6px 0 0">
+        ${kind === 'holiday' ? `<button class="btn" data-ac="${i}">ביטול (חג)</button><button class="btn" data-am="${i}">הזזה</button>` : ''}
+        ${kind === 'doc' ? `<button class="btn" data-ao="${i}">פתיחה</button>` : ''}
+        ${kind === 'series' ? `<button class="btn" data-ax="${i}">הארכה</button>` : ''}
+        ${kind === 'quota' && feat('clientfile') ? `<button class="btn" data-af="${i}">תיק מטופל</button>` : ''}
+        <button class="btn" data-ad="${i}">הסתרה</button></div></div>`; }).join('');
+  }
+  if (!alerts.length) h += '<p>אין התראות. ✓</p>';
+  const sh = openSheet(h + '<div class="actions"><button class="btn" id="alClose">סגירה</button></div>');
+  sh.querySelectorAll('[data-ac]').forEach(b => b.onclick = async () => { await setStatus(alerts[+b.dataset.ac].ev, { attended: 'no', cancel_reason: 'holiday', cancel_note: '', makeup: feat('makeups') ? 'due' : '' }); showAlerts(); });
+  sh.querySelectorAll('[data-am]').forEach(b => b.onclick = () => showMove(alerts[+b.dataset.am].ev));
+  sh.querySelectorAll('[data-ax]').forEach(b => b.onclick = () => editEvent(alerts[+b.dataset.ax].ev));
+  sh.querySelectorAll('[data-ao]').forEach(b => b.onclick = () => { const l = alerts[+b.dataset.ao].doc.webViewLink; if (l && l !== '#') window.open(l, '_blank'); });
+  sh.querySelectorAll('[data-af]').forEach(b => b.onclick = () => showClientFile(alerts[+b.dataset.af].client));
+  sh.querySelectorAll('[data-ad]').forEach(b => b.onclick = async () => { await saveSettings({ ...S.settings, dismissed_alerts: [...(S.settings.dismissed_alerts || []), alerts[+b.dataset.ad].key].slice(-300) }); showAlerts(); });
+  $('#alClose', sh).onclick = closeSheet;
+}
+
+// ---- קבלות לסוף החודש, עוזרת בשפה חופשית, הארכת סדרה, טופס קליטה, תרגילים לבית, ייצוא תיק (זהה ל-Windows)
+FEATURES.push(
+  ['bulkreceipts', '🧾 קבלות לסוף החודש', 'הפקת קבלה לכל מטופל/ת על כל הטיפולים ששולמו בחודש'],
+  ['assistant', '🗣 עוזרת בשפה חופשית', '„תקבעי ליואב ביום שלישי ב-4” – בכתב או בקול'],
+  ['intake', '📝 טופס קליטה להורים', 'קישור לטופס שנכנס ישר לרשימת ההמתנה'],
+  ['exercises', '📚 תרגילים לבית', 'ספריית תרגילים ושליחה להורים'],
+  ['export', '🖨 ייצוא תיק ל-PDF', 'כל הטיפולים וההערות של מטופל/ת בקובץ אחד'],
+);
+const INTAKE_FOLDER = 'טפסי קליטה';
+
+function showSend({ name, heading, text, subject, onSent = null, onBack = null }) {
+  const phone = clientPhone(name), emails = clientEmails(name);
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">${esc(heading)}</h3>
+    <div class="field"><label>ההודעה (אפשר לערוך)</label><textarea id="snText" rows="8" style="width:100%;box-sizing:border-box">${esc(text)}</textarea></div>
+    <p class="note">${phone ? 'טלפון: ' + ltr(esc(phone)) : 'אין טלפון שמור – וואטסאפ ייפתח לבחירת איש קשר.'}${emails.length ? '<br>מייל: ' + esc(emails.join(', ')) : ''}</p>
+    <div class="actions"><button class="btn primary" id="snWa">💬 וואטסאפ</button><button class="btn" id="snMail" ${emails.length ? '' : 'disabled'}>✉ מייל</button><button class="btn" id="snCopy">העתקה</button></div>
+    <div class="actions"><button class="btn" id="snBack">${onBack ? 'חזרה' : 'סגירה'}</button></div>`);
+  const msg = () => $('#snText', sh).value.trim(), sent = () => { if (onSent) onSent(); };
+  $('#snWa', sh).onclick = () => { window.open(whatsappUrl(phone, msg()), '_blank'); sent(); };
+  $('#snCopy', sh).onclick = async () => { try { await navigator.clipboard.writeText(msg()); toast('✓ ההודעה הועתקה'); sent(); } catch { toast('לא הצלחתי להעתיק'); } };
+  $('#snMail', sh).onclick = async () => { try { busy(true); await sendPlainEmail(emails.join(', '), subject, msg()); toast('✓ נשלח במייל'); sent(); closeSheet(); } catch (e) { handleErr(e); } finally { busy(false); } };
+  $('#snBack', sh).onclick = () => (onBack ? onBack() : closeSheet());
+}
+
+// ---- קבלות לסוף החודש
+function showBulkReceipts(monthIdx = null) {
+  if (!morningReady()) { showMorningSettings(() => showBulkReceipts(monthIdx)); return; }
+  const months = []; let d = new Date(today().getFullYear(), today().getMonth(), 1);
+  for (let i = 0; i < 6; i++) { months.push(d); d = new Date(d.getFullYear(), d.getMonth() - 1, 1); }
+  const mi = monthIdx ?? (today().getDate() <= 10 ? 1 : 0), month = months[mi], m = morningCfg();
+  const groups = paidWithoutReceipt();
+  const rows = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'he')).map(name => {
+    const ss = groups[name].filter(e => { const s = evTimes(e).s; return s.getFullYear() === month.getFullYear() && s.getMonth() === month.getMonth(); }).sort((a, b) => evTimes(a).s - evTimes(b).s);
+    return { name, ss, missing: ss.some(e => !sessionAmount(e)), payer: (ss.map(e => props(e).pay_payer).find(Boolean)) || name };
+  }).filter(r => r.ss.length);
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">🧾 קבלות לסוף החודש</h3>
+    <div class="field"><label>חודש הטיפולים</label><select id="brMonth">${months.map((x, i) => `<option value="${i}" ${i === mi ? 'selected' : ''}>${MONTHS[x.getMonth()]} ${x.getFullYear()}</option>`).join('')}</select></div>
+    ${m.env === 'sandbox' ? '<p class="note" style="background:#FFF1D6;color:#7A4B00;padding:6px 8px;border-radius:8px">סביבת בדיקות: המסמכים לא יהיו אמיתיים.</p>' : ''}
+    ${rows.length ? `<p class="note">קבלה אחת לכל מטופל/ת על כל הטיפולים שלו/ה בחודש:</p>` + rows.map((r, i) => `<div class="card" style="margin:6px 0;padding:8px 10px">
+      <label class="check" style="margin:0"><input type="checkbox" data-br="${i}" ${r.missing ? '' : 'checked'}><b>${esc(r.name)}</b> · ${r.ss.length} טיפולים · ${fmtMoney(r.ss.reduce((t, e) => t + (sessionAmount(e) || 0), 0))}${r.missing ? ' <span class="err">⚠ חסר סכום</span>' : ''}</label>
+      <input type="text" data-bp="${i}" value="${esc(r.payer)}" placeholder="שם על הקבלה" style="margin-top:6px;width:100%;box-sizing:border-box"></div>`).join('')
+      : '<p>אין בחודש הזה טיפולים ששולמו בלי קבלה. ✓</p>'}
+    <label class="check"><input type="checkbox" id="brSend" ${m.send_email ? 'checked' : ''}>לשלוח כל קבלה במייל של המטופל/ת או ההורה (למי שיש מייל)</label>
+    <div class="actions"><button class="btn primary" id="brGo" ${rows.length ? '' : 'disabled'}>🧾 הפקת הקבלות</button><button class="btn" id="brClose">סגירה</button></div>`);
+  $('#brMonth', sh).onchange = e => showBulkReceipts(+e.target.value);
+  $('#brClose', sh).onclick = closeSheet;
+  $('#brGo', sh).onclick = async () => {
+    const jobs = rows.map((r, i) => ({ ...r, payer: sh.querySelector(`[data-bp="${i}"]`).value.trim() || r.name, on: sh.querySelector(`[data-br="${i}"]`).checked })).filter(r => r.on);
+    if (!jobs.length) return;
+    const bad = jobs.find(j => j.missing); if (bad) { toast(`ל${bad.name} יש טיפול בלי סכום`); return; }
+    const send = $('#brSend', sh).checked, total = jobs.reduce((t, j) => t + j.ss.reduce((a, e) => a + sessionAmount(e), 0), 0);
+    if (!await choose('קבלות לסוף החודש', `להפיק ${jobs.length} חשבוניות מס/קבלה, סה״כ ${fmtMoney(total)}?` + (m.env === 'production' ? '\n\nאלה מסמכים רשמיים: אחרי ההפקה אי אפשר למחוק אותם, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }])) { showBulkReceipts(mi); return; }
+    const date = isoDate(today()); let ok = 0; const errors = [];
+    busy(true);
+    try {
+      for (const j of jobs) {
+        try {
+          const emails = clientEmails(j.name);
+          const body = morningDocument(j.ss, { name: j.payer, emails, send: send && emails.length > 0, item: m.item, remarks: renderReceiptText(m.template || '', j.ss, j.name), date, vatIncluded: m.vat_included });
+          const res = await morningCreate(m.env, body), url = res.url || {};
+          const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: j.ss.length > 1 ? String(j.ss.length) : '' };
+          for (const e of j.ss) await setStatus(e, ch);
+          ok++;
+        } catch (e) { errors.push(`${j.name}: ${e.message}`); }
+      }
+    } finally { busy(false); }
+    alertSheet('קבלות לסוף החודש', `✓ הופקו ${ok} קבלות.` + (errors.length ? '\n\nלא הצלחתי:\n' + errors.join('\n') : ''));
+  };
+}
+
+// ---- עוזרת בשפה חופשית
+const ASSIST_SCHEMA = { type: 'OBJECT', properties: {
+  action: { type: 'STRING', enum: ['create', 'move', 'cancel', 'attended', 'paid', 'question', 'unknown'] },
+  client: { type: 'STRING' }, event_id: { type: 'STRING' }, date: { type: 'STRING' }, time: { type: 'STRING' },
+  minutes: { type: 'INTEGER' }, weekly_count: { type: 'INTEGER' },
+  reason: { type: 'STRING', enum: ['', 'client', 'sick', 'me', 'holiday', 'noshow', 'other'] },
+  method: { type: 'STRING', enum: ['', 'cash', 'bank', 'bit', 'paybox', 'other'] },
+  amount: { type: 'NUMBER' }, explanation: { type: 'STRING' } }, required: ['action', 'explanation'] };
+const ASSIST_SYSTEM = `את/ה עוזר/ת יומן של קלינאית תקשורת. היא כותבת בקשה בעברית חופשית, ואת/ה מתרגם/ת אותה לפעולה אחת.
+פעולות: create – פגישה חדשה למטופל/ת (date, time, minutes, ואם ביקשה „כל שבוע” – weekly_count, ברירת מחדל 10);
+move – הזזת פגישה קיימת (event_id מהרשימה, date ו-time החדשים); cancel – ביטול פגישה (event_id, reason);
+attended – סימון שהפגישה התקיימה (event_id); paid – סימון תשלום (event_id, method, amount אם נאמר);
+question – שאלה על היסטוריה, נתונים או חובות; unknown – אם הבקשה לא ברורה (ואז explanation עם שאלה קצרה).
+כללים: event_id רק מתוך רשימת הפגישות. „מחר”, „ביום שלישי”, „בשבוע הבא” – לפי התאריך של היום. שעה בלי ציון בוקר/ערב
+בין 1 ל-7 היא אחר הצהריים (4 = 16:00). שם המטופל/ת – כפי שמופיע ברשימה אם יש התאמה. explanation – משפט קצר בעברית
+שמתאר מה תעשה/י. אם לא ברור לאיזו פגישה הכוונה – unknown.`;
+function assistContext() {
+  const now = new Date(), w = { ...DEFAULT_WORK, ...(S.settings.work_hours || {}) };
+  const lines = [`היום: יום ${DAYS[now.getDay()]} ${isoDate(now)}, השעה ${hm(now)}.`, `אורך טיפול רגיל: ${w.minutes} דקות.`, 'מטופלים: ' + clientNames().join(', '), 'פגישות (id | תאריך | יום | שעה | מטופל/ת | סטטוס):'];
+  for (const e of uniqueSessions(allKnown())) {
+    const s = evTimes(e).s;
+    if (s >= addDays(now, -14) && s <= addDays(now, 45)) lines.push(`${e.id} | ${isoDate(s)} | ${DAYS[s.getDay()]} | ${hm(s)} | ${title(e)} | ${statusText(e)}${paid(e) ? ' | שולמה' : ''}`);
+  }
+  return lines.join('\n');
+}
+async function geminiAssist(request) {
+  if (DEMO) { await new Promise(r => setTimeout(r, 400)); const e = uniqueSessions(allKnown()).find(x => evTimes(x).s > new Date());
+    return { action: 'move', event_id: e.id, date: isoDate(addDays(evTimes(e).s, 1)), time: '17:00', explanation: 'הזזה' }; }
+  const key = store.get('geminiKey', '');
+  const body = { systemInstruction: { parts: [{ text: ASSIST_SYSTEM }] }, contents: [{ role: 'user', parts: [{ text: assistContext() + '\n\nהבקשה: ' + request }] }],
+    generationConfig: { responseMimeType: 'application/json', responseSchema: ASSIST_SCHEMA, temperature: 0 } };
+  let busy2 = false;
+  for (const { model, wait } of geminiAttempts()) {
+    if (wait) await new Promise(res => setTimeout(res, wait));
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.status === 404) continue;
+    if (GEMINI_BUSY.includes(r.status)) { busy2 = true; continue; }
+    if (!r.ok) throw new Error(`שגיאה מ-Gemini (${r.status}).`);
+    const j = await r.json(); recordUsage(model, j);
+    return JSON.parse(j.candidates[0].content.parts[0].text);
+  }
+  throw new Error(busy2 ? GEMINI_BUSY_MSG : 'לא נמצא מודל Gemini זמין.');
+}
+function showAssistant(prefill = '', result = '') {
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">🗣 עוזרת</h3>
+    <p class="note">למשל: „תקבעי ליואב טיפול ביום שלישי ב-4”, „תזיזי את נועה למחר ב-5”, „נועה שילמה בביט על היום”, „דני ביטל את הטיפול של מחר – מחלה”.</p>
+    <div class="field"><textarea id="asQ" rows="2" style="width:100%;box-sizing:border-box" placeholder="מה לעשות?">${esc(prefill)}</textarea></div>
+    <div class="seg">${feat('voice') ? '<button class="btn" id="asRec">🎤 בקול</button>' : ''}<button class="btn primary" id="asGo">הבנה</button></div>
+    <div id="asOut" style="white-space:pre-wrap;margin:8px 0">${esc(result)}</div>
+    <div class="actions"><button class="btn primary" id="asOk" style="display:none">✓ אישור וביצוע</button><button class="btn" id="asClose">סגירה</button></div>`);
+  const out = $('#asOut', sh), okb = $('#asOk', sh);
+  let plan = null, timer = null;
+  const find = id => allKnown().find(e => e.id === id);
+  const at = (d, t) => fromInputs(d, t);
+  const understand = async () => {
+    const text = $('#asQ', sh).value.trim(); if (!text) return;
+    if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(() => showAssistant(text)); return; }
+    out.textContent = 'חושבת…'; okb.style.display = 'none';
+    try { plan = await geminiAssist(text); } catch (e) { out.textContent = 'שגיאה: ' + e.message; return; }
+    const a = plan.action, ev = find(plan.event_id || '');
+    let desc = plan.explanation || '', ok = true;
+    try {
+      if (a === 'create') { const st = at(plan.date, plan.time), n = +plan.weekly_count || 0;
+        desc = `פגישה חדשה ל${plan.client}: יום ${DAYS[st.getDay()]} ${dmy(st)} בשעה ${hm(st)}, ${plan.minutes || 45} דקות${n > 1 ? `, כל שבוע (${n} פגישות)` : ''}` + (clientNames().includes((plan.client || '').trim()) ? '' : '\n⚠ שם שלא מופיע ברשימת המטופלים.');
+        if (isNaN(st)) ok = false; }
+      else if (a === 'move' && ev) { const st = at(plan.date, plan.time), s = evTimes(ev).s;
+        desc = `הזזת הפגישה של ${title(ev)} מ-${dmy(s).slice(0, 5)} ${hm(s)} ליום ${DAYS[st.getDay()]} ${dmy(st).slice(0, 5)} בשעה ${hm(st)}`; if (isNaN(st)) ok = false; }
+      else if (['cancel', 'attended', 'paid'].includes(a) && ev) { const s = evTimes(ev).s;
+        desc = `${{ cancel: 'ביטול', attended: 'סימון שהתקיימה', paid: 'סימון תשלום' }[a]}: ${title(ev)}, ${dmy(s).slice(0, 5)} בשעה ${hm(s)}`;
+        if (a === 'cancel' && plan.reason) desc += ` (סיבה: ${(CANCEL_REASONS.find(r => r[0] === plan.reason) || [0, ''])[1]})`;
+        if (a === 'paid') desc += ` · ${(PAY_METHODS.find(p => p[0] === (plan.method || 'other')) || [0, ''])[1]}${plan.amount ? ' · ' + fmtMoney(plan.amount) : ''}`; }
+      else if (a === 'question') desc = 'זו שאלה – אפתח אותה ב„שאלה ל-AI”.';
+      else ok = false;
+    } catch { ok = false; }
+    out.textContent = desc || 'לא הבנתי. אפשר לנסח אחרת?';
+    okb.style.display = ok && a !== 'unknown' ? '' : 'none';
+  };
+  $('#asGo', sh).onclick = understand;
+  const rb = $('#asRec', sh);
+  if (rb) rb.onclick = async () => {
+    if (Voice.rec) {
+      clearInterval(timer); rb.textContent = '🎤 בקול';
+      const wav = await Voice.stop(); out.textContent = 'Gemini מתמלל…';
+      try { const t = await geminiTranscribe(wav); if (t) { $('#asQ', sh).value = t; understand(); } else out.textContent = 'לא זוהה דיבור.'; } catch (e) { out.textContent = 'שגיאה: ' + e.message; }
+      return;
+    }
+    if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(() => showAssistant()); return; }
+    try { await Voice.start(); } catch { alertSheet('הקלטה', 'לא הצלחתי להפעיל את המיקרופון. מאשרים לאפליקציה גישה למיקרופון בהגדרות של Chrome.'); return; }
+    rb.textContent = '⏹ סיום'; out.textContent = '🔴 מקליט…'; let secs = 0;
+    timer = setInterval(() => { secs++; if (secs >= 60) rb.click(); }, 1000);
+  };
+  okb.onclick = async () => {
+    const p = plan || {}, a = p.action, ev = find(p.event_id || '');
+    try {
+      busy(true);
+      if (a === 'create') {
+        const st = at(p.date, p.time), en = new Date(st.getTime() + (+p.minutes || 45) * 60000), tz = currentTz(), name = (p.client || '').trim();
+        const body = { summary: name, start: { dateTime: localStr(st), timeZone: tz }, end: { dateTime: localStr(en), timeZone: tz } };
+        const prev = clientSessions(name).filter(e => e.location); if (prev.length) body.location = prev[prev.length - 1].location;
+        if ((+p.weekly_count || 0) > 1) body.recurrence = [`RRULE:FREQ=WEEKLY;COUNT=${+p.weekly_count}`];
+        const cal = (S.calId && S.calId !== ALL && writable().find(c => c.id === S.calId)) || writable()[0];
+        await G.insert(cal.id, body); changed();
+      } else if (a === 'move' && ev) {
+        const st = at(p.date, p.time), t = evTimes(ev), en = new Date(st.getTime() + (t.e - t.s));
+        await G.patch(ev._calendar_id, ev.id, { start: { dateTime: localStr(st), timeZone: currentTz() }, end: { dateTime: localStr(en), timeZone: currentTz() } }, hasGuests(ev)); changed();
+      } else if (a === 'cancel' && ev) {
+        await setStatus(ev, { attended: 'no', cancel_reason: p.reason || '', cancel_note: '', ...(feat('makeups') ? { makeup: MAKEUP_REASONS.includes(p.reason) ? 'due' : '' } : {}) });
+      } else if (a === 'attended' && ev) {
+        await setStatus(ev, { attended: 'yes', cancel_reason: '', cancel_note: '' }); quotaWarning(ev);
+      } else if (a === 'paid' && ev) {
+        await setStatus(ev, { paid: 'yes', pay_method: p.method || 'other', pay_date: isoDate(today()), ...(p.amount ? { pay_amount: String(p.amount) } : {}) });
+      } else if (a === 'question') { busy(false); showAI($('#asQ', sh).value.trim()); return; }
+      showAssistant('', '✓ בוצע. אפשר לכתוב בקשה נוספת.');
+    } catch (e) { handleErr(e); } finally { busy(false); }
+  };
+  $('#asClose', sh).onclick = closeSheet;
+}
+
+// ---- תרגילים לבית
+function showExercises(ev = null, q = '') {
+  const all = (S.settings.exercises || []).slice().sort((a, b) => (a.topic || '').localeCompare(b.topic || '', 'he') || a.title.localeCompare(b.title, 'he'));
+  const items = all.filter(x => !q || x.title.includes(q) || (x.topic || '').includes(q));
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">📚 תרגילים לבית${ev ? ' – ' + esc(title(ev)) : ''}</h3>
+    <div class="field"><input type="search" id="exQ" placeholder="חיפוש לפי שם או נושא…" value="${esc(q)}"></div>
+    ${items.map((x, i) => `<div class="card" style="margin:6px 0;padding:8px 10px">
+      ${ev ? `<label class="check" style="margin:0"><input type="checkbox" data-xc="${i}"><b>${esc(x.title)}</b>${x.topic ? ` <span class="note">(${esc(x.topic)})</span>` : ''}</label>` : `<b>${esc(x.title)}</b>${x.topic ? ` <span class="note">(${esc(x.topic)})</span>` : ''}`}
+      <div class="note" style="white-space:pre-wrap">${esc(x.text)}</div>
+      <div class="seg" style="margin:6px 0 0"><button class="btn" data-xe="${i}">עריכה</button><button class="btn danger" data-xd="${i}">מחיקה</button></div></div>`).join('') || '<p class="note">אין עדיין תרגילים.</p>'}
+    <div class="actions">${ev ? '<button class="btn primary" id="exSend">📨 שליחה להורה</button>' : ''}<button class="btn" id="exAdd">+ תרגיל חדש</button><button class="btn" id="exClose">סגירה</button></div>`);
+  $('#exQ', sh).onchange = e => showExercises(ev, e.target.value.trim());
+  $('#exAdd', sh).onclick = () => showExerciseEdit(null, () => showExercises(ev, q));
+  $('#exClose', sh).onclick = () => (ev ? showDetails(ev) : closeSheet());
+  sh.querySelectorAll('[data-xe]').forEach(b => b.onclick = () => showExerciseEdit(items[+b.dataset.xe], () => showExercises(ev, q)));
+  sh.querySelectorAll('[data-xd]').forEach(b => b.onclick = async () => {
+    const x = items[+b.dataset.xd];
+    if (await choose('מחיקה', `למחוק את „${x.title}”?`, [{ label: 'מחיקה', value: true, cls: 'danger' }])) await saveSettings({ ...S.settings, exercises: all.filter(y => y.id !== x.id) });
+    showExercises(ev, q);
+  });
+  const sb = $('#exSend', sh);
+  if (sb) sb.onclick = () => {
+    const chosen = items.filter((_, i) => sh.querySelector(`[data-xc="${i}"]`).checked);
+    if (!chosen.length) { toast('מסמנים תרגיל אחד או יותר'); return; }
+    const name = title(ev).trim(), titles = chosen.map(x => x.title).join(' · ').slice(0, 900);
+    showSend({ name, heading: 'שליחת תרגול לבית', subject: `תרגול לבית – ${name}`,
+      text: `שלום, תרגול לבית בעקבות הטיפול של ${name}:\n\n` + chosen.map(x => `• ${x.title}\n${x.text}`).join('\n\n') + '\n\nבהצלחה!',
+      onSent: () => setStatus(ev, { homework: titles }), onBack: () => showExercises(ev, q) });
+  };
+}
+function showExerciseEdit(x, back) {
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">${x ? 'עריכת תרגיל' : 'תרגיל חדש'}</h3>
+    <div class="field"><label>שם</label><input type="text" id="xeT" value="${esc(x ? x.title : '')}"></div>
+    <div class="field"><label>נושא</label><input type="text" id="xeP" placeholder="למשל: הגייה, שפה, שטף, בליעה" value="${esc(x ? x.topic || '' : '')}"></div>
+    <div class="field"><label>התרגיל</label><textarea id="xeX" rows="5" style="width:100%;box-sizing:border-box" placeholder="מה עושים בבית, כמה פעמים, ולמה זה חשוב">${esc(x ? x.text : '')}</textarea></div>
+    <p class="err" id="xeErr"></p>
+    <div class="actions"><button class="btn primary" id="xeSave">שמירה</button><button class="btn" id="xeBack">חזרה</button></div>`);
+  $('#xeBack', sh).onclick = back;
+  $('#xeSave', sh).onclick = async () => {
+    const t = $('#xeT', sh).value.trim(), tx = $('#xeX', sh).value.trim();
+    if (!t || !tx) { $('#xeErr', sh).textContent = 'צריך שם ותיאור.'; return; }
+    const v = { ...(x || {}), title: t, topic: $('#xeP', sh).value.trim(), text: tx }; v.id = v.id || 'x' + Date.now();
+    await saveSettings({ ...S.settings, exercises: (S.settings.exercises || []).filter(y => y.id !== v.id).concat([v]) });
+    back();
+  };
+}
+
+// ---- ייצוא תיק מטופל ל-PDF (דרך הדפסה ← „שמירה כ-PDF”)
+async function exportClient(name) {
+  const ss = clientSessions(name), info = clientInfo(name), now = new Date();
+  let docs = [];
+  if (feat('docs')) { try { busy(true); docs = await ClientDocs.list(name); } catch { /* ignore */ } finally { busy(false); } }
+  const held = ss.filter(e => attended(e) === 'yes').length, canc = ss.filter(e => attended(e) === 'no').length;
+  const facts = [info.phone ? 'טלפון: ' + esc(info.phone) : '', (info.emails || []).length ? 'מייל: ' + esc(info.emails.join(', ')) : '',
+    (info.payers || []).length ? 'משלמים: ' + esc(info.payers.join(', ')) : '', quotaStatus(name) ? 'מכסה: ' + esc(quotaText(quotaStatus(name))) : ''].filter(Boolean);
+  const rows = ss.filter(e => evTimes(e).s <= now || attended(e) === 'no').map(e => { const s = evTimes(e).s, n = sessionNo(e), p = props(e);
+    return `<tr><td>${dmy(s)}</td><td>${hm(s)}</td><td>${n || ''}</td><td>${esc(statusText(e))}</td><td style="white-space:pre-wrap">${esc(evNote(e))}${p.homework ? '<br>📚 ' + esc(p.homework) : ''}</td></tr>`; }).join('');
+  const html = `<!doctype html><html dir="rtl" lang="he"><head><meta charset="utf-8"><title>תיק מטופל – ${esc(name)}</title><style>
+    body{font-family:Arial,sans-serif;font-size:11pt;color:#1F2D2B;margin:24px}h1{color:#1E4D47;font-size:18pt}table{width:100%;border-collapse:collapse}
+    th,td{border:1px solid #D3E0DD;padding:5px;text-align:right;vertical-align:top}th{background:#E6EFED}.n{color:#8A9A97;font-size:8pt}</style></head><body>
+    <h1>תיק מטופל – ${esc(name)}</h1><p>הופק ב-${dmy(today())}${ss.length ? ' · טיפולים מ-' + dmy(evTimes(ss[0]).s) : ''} · התקיימו ${held} · בוטלו ${canc}</p>
+    ${facts.length ? `<p>${facts.join('<br>')}</p>` : ''}
+    <table><tr><th>תאריך</th><th>שעה</th><th>מפגש</th><th>סטטוס</th><th>מה היה בטיפול</th></tr>${rows}</table>
+    ${docs.length ? `<h3>מסמכים</h3><ul>${docs.map(f => { const ap = f.appProperties || {}; return `<li>${esc(f.name)} – ${docTypeLabel(ap.doc_type)}${ap.expiry ? ' (תוקף עד ' + dmy(parseDateOnly(ap.expiry)) + ')' : ''}</li>`; }).join('')}</ul>` : ''}
+    <p class="n">מסמך חסוי – מכיל מידע רפואי.</p><script>setTimeout(function(){print()},300)<\/script></body></html>`;
+  const w = window.open('', '_blank');
+  if (!w) { toast('הדפדפן חסם חלון חדש'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+// ---- טופס קליטה: הטופס רץ בסקריפט „ממסר Morning”, והפניות נשמרות כקבצים ב-Drive
+function intakeToWait(d, fileId) {
+  const note = [d.parent ? 'הורה: ' + d.parent : '', d.age ? 'גיל: ' + d.age : '', d.reason ? 'סיבת פנייה: ' + d.reason : '', d.notes || ''].filter(Boolean).join('\n');
+  return { id: 'f' + fileId, name: String(d.child || d.parent || 'פנייה').trim().slice(0, 80), phone: String(d.phone || '').slice(0, 30), email: String(d.email || '').slice(0, 100),
+    location: String(d.location || '').slice(0, 100), note: note.slice(0, 1500), days: (d.days || []).map(Number).filter(x => x >= 0 && x <= 5),
+    from: String(d.from || '').slice(0, 5), to: String(d.to || '').slice(0, 5), added: String(d.sent || isoDate(today())).slice(0, 10), source: 'form' };
+}
+const relayUrl = () => (S.settings.relay_url || morningRelay() || '').trim();
+const intakeUrl = () => relayUrl().startsWith('https://') ? relayUrl() + (relayUrl().includes('?') ? '&' : '?') + 'form=intake' : '';
+async function importIntake() {
+  if (!S.token || !feat('intake') || !relayUrl() || DEMO) return;
+  try {
+    const fid = await AppData.folder(INTAKE_FOLDER, await AppData.app(), 'intakeFolder');
+    const r = await gfetch('https://www.googleapis.com/drive/v3/files?' + qs({ q: `'${fid}' in parents and trashed = false`, spaces: 'drive', pageSize: 100, fields: 'files(id,name)' }));
+    const items = [];
+    for (const f of r.files || []) { try { items.push(intakeToWait(JSON.parse(await (await Drive.download(f.id)).text()), f.id)); } catch { /* ignore */ } }
+    if (!items.length) return;
+    const have = new Set((S.settings.waitlist || []).map(w => w.id)), added = items.filter(w => !have.has(w.id));
+    if (added.length) { await saveSettings({ ...S.settings, waitlist: [...(S.settings.waitlist || []), ...added] }); toast(`✓ ${added.length} פניות חדשות מטופס הקליטה נכנסו לרשימת ההמתנה`); }
+    for (const w of items) { try { await gfetch(`https://www.googleapis.com/drive/v3/files/${enc(w.id.slice(1))}?fields=id`, { method: 'PATCH', json: { trashed: true } }); } catch { /* ignore */ } }
+  } catch { /* ignore */ }
+}
+function showIntake() {
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">📝 טופס קליטה להורים</h3>
+    <p>שולחים להורים קישור לטופס. מה שהם ממלאים (פרטים, סיבת פנייה, זמינות ומקום מועדף) נכנס ישר לרשימת ההמתנה, ומגיע אלייך גם מייל. הטופס רץ בסקריפט „ממסר Morning” שבחשבון Google שלך.</p>
+    <div class="field"><label>כתובת הממסר</label><input type="url" dir="ltr" id="inRelay" value="${esc(relayUrl())}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+    <div class="field"><label>כותרת הטופס</label><input type="text" id="inTitle" value="${esc(S.settings.intake_title || 'טופס פנייה לטיפול בקלינאות תקשורת')}"></div>
+    <p class="note" dir="ltr" id="inLink" style="word-break:break-all;text-align:left"></p>
+    <div class="actions"><button class="btn" id="inCopy">העתקת הקישור</button><button class="btn" id="inWa">💬 וואטסאפ</button><button class="btn" id="inOpen">פתיחה</button></div>
+    <p class="note">צריך את גרסת הקוד העדכנית של הממסר.</p>
+    <div class="actions"><button class="btn primary" id="inSave">שמירה</button><button class="btn" id="inClose">סגירה</button></div>`);
+  const url = () => { const u = $('#inRelay', sh).value.trim(); return u.startsWith('https://') ? u + (u.includes('?') ? '&' : '?') + 'form=intake' : ''; };
+  const upd = () => { $('#inLink', sh).textContent = url() || '(מדביקים קודם את כתובת הממסר)'; };
+  $('#inRelay', sh).oninput = upd; upd();
+  $('#inCopy', sh).onclick = async () => { if (url()) { try { await navigator.clipboard.writeText(url()); toast('✓ הועתק'); } catch { toast('לא הצלחתי להעתיק'); } } };
+  $('#inWa', sh).onclick = () => { if (url()) window.open(whatsappUrl('', `שלום, זה הטופס לפנייה לטיפול. אשמח שתמלאו אותו: ${url()}`), '_blank'); };
+  $('#inOpen', sh).onclick = () => { if (url()) window.open(url(), '_blank'); };
+  $('#inClose', sh).onclick = closeSheet;
+  $('#inSave', sh).onclick = async () => { const st = { ...S.settings, relay_url: $('#inRelay', sh).value.trim(), intake_title: $('#inTitle', sh).value.trim() }; closeSheet(); await saveSettings(st); };
 }
 
 function showDetails(ev) {
@@ -1738,7 +2562,7 @@ function showDetails(ev) {
     ${hasGuests(ev) ? `<div class="k">זימון</div><div dir="auto">${esc((ev.attendees || []).filter(a => !a.self).map(a => a.email).join(', '))} <span class="note">(קיבלו זימון ליומן)</span></div>` : ''}
     ${!isSession(ev) ? '<div class="k">סוג</div><div class="note">אירוע (לא טיפול) – לא נספר בסיכומים, במספור ובתשלומים</div>' : ''}
     ${t.allDay || !isSession(ev) ? '' : `<div class="k">מפגש</div><div>${a === 'no' ? '<span class="note">— (פגישה שלא התקיימה לא נספרת)</span>' : `${sessionNo(ev) ? 'מפגש ' + sessionNo(ev) : 'לא ידוע'}${sessionAnchor(ev) ? ' <span class="note">(נקבע ידנית)</span>' : ''}${sessionMark(ev) === 'stop' ? ' <span class="note">(לא ידוע מכאן והלאה)</span>' : ''} ${edit ? '<button class="btn" id="numBtn" style="padding:3px 10px;font-size:13px;margin-inline-start:6px">שינוי</button>' : ''}`}</div>`}
-    ${t.allDay || !isSession(ev) || !quotaStatus(title(ev).trim()) ? '' : `<div class="k">מכסה</div><div style="${quotaStatus(title(ev).trim()).left <= 2 ? 'color:#B54708;font-weight:600' : ''}">${esc(quotaText(quotaStatus(title(ev).trim())))}</div>`}
+    ${t.allDay || !isSession(ev) || !feat('quota') || !quotaStatus(title(ev).trim()) ? '' : `<div class="k">מכסה</div><div style="${quotaStatus(title(ev).trim()).left <= 2 ? 'color:#B54708;font-weight:600' : ''}">${esc(quotaText(quotaStatus(title(ev).trim())))}</div>`}
     ${t.allDay || !isSession(ev) ? '' : `<div class="k">מחיר</div><div>${evPrice(ev) ? fmtMoney(evPrice(ev)) + (toAmount(props(ev).price) ? '' : ' <span class="note">(ברירת מחדל)</span>') : '<span class="note">לא נקבע (אפשר לקבוע ב„עריכה” או ב-☰ ← מחירי טיפול)</span>'}</div>`}</div>`;
   if (!t.allDay && isSession(ev)) {
     h += `<div class="sec">הפגישה</div><div class="seg">
@@ -1746,6 +2570,9 @@ function showDetails(ev) {
         <button class="btn ${a === 'no' ? 'on' : ''}" data-att="no" ${dis}>✗ לא התקיימה</button></div>
       ${a === '' ? '<p class="note" style="margin-top:-6px">טרם סומן · לחיצה חוזרת על סימון מבטלת אותו</p>' : ''}
       ${a === 'no' && cancelLabel(ev) ? `<p class="note" style="margin-top:-4px">סיבה: ${esc(cancelLabel(ev))}</p>` : ''}
+      ${feat('makeups') && makeupDue(ev) ? `<p class="note" style="margin-top:-4px">↺ צריך פגישת השלמה</p>${edit ? '<button class="btn" id="mkBtn" style="width:100%;margin-bottom:8px">↺ קביעת פגישת השלמה</button>' : ''}` : ''}
+      ${feat('makeups') && a === 'no' && props(ev).makeup === 'done' ? '<p class="note" style="margin-top:-4px">✓ נקבעה פגישת השלמה</p>' : ''}
+      ${feat('makeups') && props(ev).makeup_for ? `<p class="note" style="margin-top:-4px">↺ פגישת השלמה${(() => { const o = allKnown().find(x => x.id === props(ev).makeup_for); return o ? ' לטיפול מ-' + dmy(evTimes(o).s) : ''; })()}</p>` : ''}
       <div class="sec">תשלום</div><div class="seg">
         <button class="btn ${!paid(ev) ? 'on' : ''}" id="unpaidBtn" ${dis}>לא שולמה</button>
         <button class="btn ${paid(ev) ? 'on' : ''}" id="paidBtn" ${dis}>₪ שולמה${paid(ev) && payLabel(ev) ? ' · ' + esc(payLabel(ev)) : '…'}</button></div>
@@ -1753,17 +2580,19 @@ function showDetails(ev) {
       ${paid(ev) && props(ev).pay_receipt ? '<button class="btn" id="rcptBtn" style="width:100%;margin-bottom:8px">📎 צפייה באישור התשלום</button>' : ''}
       <div class="sec">קבלה</div><div class="seg">
         <button class="btn ${!receiptIssued(ev) ? 'on' : ''}" id="rcNo" ${dis}>לא הוצאה</button>
-        <button class="btn ${receiptIssued(ev) && props(ev).rcpt_src === 'morning' ? 'on' : ''}" id="rcMorning" ${edit && paid(ev) && !receiptIssued(ev) ? '' : 'disabled'}>🧾 ${receiptIssued(ev) && props(ev).rcpt_src === 'morning' ? 'הופקה ב-Morning' : 'הפקה ב-Morning…'}</button>
+        <button class="btn ${receiptIssued(ev) && props(ev).rcpt_src === 'morning' ? 'on' : ''}" id="rcMorning" ${feat('morning') ? '' : 'style="display:none"'} ${edit && paid(ev) && !receiptIssued(ev) ? '' : 'disabled'}>🧾 ${receiptIssued(ev) && props(ev).rcpt_src === 'morning' ? 'הופקה ב-Morning' : 'הפקה ב-Morning…'}</button>
         <button class="btn ${receiptIssued(ev) && props(ev).rcpt_src !== 'morning' ? 'on' : ''}" id="rcYes" ${dis}>שיוך ידני…</button></div>
       ${receiptIssued(ev) ? `<p class="note" style="margin-top:-4px">${esc(receiptDetails(ev))}</p>` : ''}
       ${receiptIssued(ev) && (props(ev).rcpt_url || props(ev).rcpt_file) ? '<button class="btn" id="rcView" style="width:100%;margin-bottom:8px">📄 צפייה בקבלה</button>' : ''}
-      ${noteBoxHtml(ev)}
+      ${feat('notes') ? noteBoxHtml(ev) : ''}
       <p class="note">הסימונים נשמרים רק לפגישה הזו, לא לכל הסדרה.</p>`;
   }
   h += `<div class="actions">
       <button class="btn primary" id="moveBtn" ${edit && !t.allDay ? '' : 'disabled'}>הזזה</button>
       <button class="btn" id="editBtn" ${edit && !t.allDay ? '' : 'disabled'}>עריכה</button>
       <button class="btn danger" id="delBtn" ${dis}>מחיקה</button></div>
+    ${!t.allDay && isSession(ev) && (feat('clientfile') || feat('exercises')) ? `<div class="actions">${feat('exercises') ? '<button class="btn" id="hwBtn">📚 תרגיל לבית</button>' : ''}${feat('clientfile') ? '<button class="btn" id="fileBtn">📁 תיק מטופל</button>' : ''}</div>
+      ${feat('exercises') && props(ev).homework ? `<p class="note">📚 נשלח: ${esc(props(ev).homework)}</p>` : ''}` : ''}
     <div class="actions"><button class="btn" id="closeBtn">סגירה</button></div>`;
   const sh = openSheet(h);
   sh.querySelectorAll('[data-att]').forEach(b => b.onclick = async () => {
@@ -1771,12 +2600,17 @@ function showDetails(ev) {
     const target = attended(ev) === b.dataset.att ? '' : b.dataset.att;
     if (target === 'no') { showCancel(ev); return; }
     const changes = { attended: target, cancel_reason: '', cancel_note: '' };
+    if (props(ev).makeup === 'due') changes.makeup = '';
     const g = await guardSequence(ev, { props: { ...props(ev), ...changes } });
     if (g.ok) { setStatus(ev, changes); applyPin(g.pin); }
     showDetails(ev);
     if (g.ok && target === 'yes') quotaWarning(ev);
   });
   bindNoteBox(ev, sh);
+  if (!feat('voice') && $('#noteRec', sh)) $('#noteRec', sh).style.display = 'none';
+  const mkb = $('#mkBtn', sh); if (mkb) mkb.onclick = () => scheduleMakeup(ev, () => showDetails(ev));
+  const hwb = $('#hwBtn', sh); if (hwb) hwb.onclick = () => showExercises(ev);
+  const flb = $('#fileBtn', sh); if (flb) flb.onclick = () => showClientFile(title(ev).trim());
   const nb = $('#numBtn', sh); if (nb) nb.onclick = () => showSessionNo(ev);
   const rn = $('#rcNo', sh); if (rn) rn.onclick = async () => {
     if (props(ev).rcpt_src === 'morning') {
@@ -1831,13 +2665,17 @@ function showCancel(ev) {
   const sh = openSheet(`<h3 style="margin:4px 0 6px">למה הפגישה של „${esc(title(ev))}” לא התקיימה?</h3>
     ${CANCEL_REASONS.map(([k, l]) => `<label class="radio"><input type="radio" name="cr" value="${k}" ${p.cancel_reason === k ? 'checked' : ''}>${l}</label>`).join('')}
     <div class="field"><input type="text" id="crNote" placeholder="פירוט (לא חובה)" value="${esc(p.cancel_note || '')}"></div>
-    <p class="note">אפשר גם לשמור בלי סיבה.</p><p class="err" id="crErr"></p>
+    <p class="note">אפשר גם לשמור בלי סיבה.</p>
+    ${feat('makeups') ? `<label class="check"><input type="checkbox" id="crMk" ${p.makeup === 'due' ? 'checked' : ''}>צריך פגישת השלמה</label>` : ''}
+    <p class="err" id="crErr"></p>
     <div class="actions"><button class="btn primary" id="crSave">שמירה</button><button class="btn" id="crCancel">ביטול</button></div>`);
   $('#crCancel', sh).onclick = () => showDetails(ev);
+  if ($('#crMk', sh) && p.makeup !== 'due') sh.querySelectorAll('input[name=cr]').forEach(r => r.onchange = () => { $('#crMk', sh).checked = MAKEUP_REASONS.includes(r.value); });
   $('#crSave', sh).onclick = () => {
     const r = sh.querySelector('input[name=cr]:checked'), note = $('#crNote', sh).value.trim();
     if (r && r.value === 'other' && !note) { $('#crErr', sh).textContent = 'יש לכתוב מה הסיבה.'; return; }
     const changes = { attended: 'no', cancel_reason: r ? r.value : '', cancel_note: note };
+    if ($('#crMk', sh)) changes.makeup = $('#crMk', sh).checked ? 'due' : (p.makeup === 'done' ? 'done' : '');
     guardSequence(ev, { props: { ...props(ev), ...changes } }).then(g => { if (g.ok) { setStatus(ev, changes); applyPin(g.pin); } showDetails(ev); });
   };
 }
@@ -1941,7 +2779,7 @@ function showMorningSettings(then) {
   $('#moCancel', sh).onclick = closeSheet;
   $('#moSave', sh).onclick = async () => {
     keep(); store.set('morningKeys', k); store.set('morningRelay', $('#moRelay', sh).value.trim());
-    await saveSettings({ ...S.settings, morning: { env, item: $('#moItem', sh).value.trim() || DEFAULT_MORNING.item, template: $('#moTpl', sh).value.trim(), vat_included: $('#moVat', sh).checked, send_email: $('#moSend', sh).checked } });
+    await saveSettings({ ...S.settings, ...($('#moRelay', sh).value.trim() ? { relay_url: $('#moRelay', sh).value.trim() } : {}), morning: { env, item: $('#moItem', sh).value.trim() || DEFAULT_MORNING.item, template: $('#moTpl', sh).value.trim(), vat_included: $('#moVat', sh).checked, send_email: $('#moSend', sh).checked } });
     closeSheet(); if (then) then();
   };
 }
@@ -2122,8 +2960,8 @@ function mdToHtml(md) {
   return out;
 }
 const AI = { history: [], key: null, data: '', transcript: [] };
-function showAI() {
-  if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(showAI); return; }
+function showAI(initialQ = '') {
+  if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(() => showAI(initialQ)); return; }
   const names = [...new Set([...S.events.filter(isSession).map(e => title(e).trim()), ...Object.keys(S.settings.clients || {})])].sort((a, b) => a.localeCompare(b, 'he'));
   const sh = openSheet(`<h3 style="margin:4px 0 6px">שאלה ל-AI על הטיפולים</h3>
     <div class="two"><select id="aiRange">${AI_RANGES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
@@ -2160,6 +2998,7 @@ function showAI() {
   };
   sh.querySelectorAll('[data-q]').forEach(b => b.onclick = () => ask(b.dataset.q));
   $('#aiAsk', sh).onclick = () => ask($('#aiQ', sh).value);
+  if (initialQ) ask(initialQ);
   $('#aiQ', sh).onkeydown = e => { if (e.key === 'Enter') ask($('#aiQ', sh).value); };
   $('#aiClose', sh).onclick = closeSheet;
 }
@@ -2354,7 +3193,7 @@ function showReceiptMatch(blob, url, info, matches, onSaved = null) {
       toast(`✓ התשלום נשמר ב-Google (${n === 1 ? 'פגישה אחת' : n + ' פגישות'}), כולל הצילום`);
       if (onSaved) onSaved();
       changed();
-      if (morningReady() && !chosen.some(receiptIssued)) {
+      if (feat('morning') && morningReady() && !chosen.some(receiptIssued)) {
         const yes = await choose('קבלה ב-Morning', 'להפיק עכשיו חשבונית מס/קבלה ב-Morning על התשלום הזה?', [{ label: 'כן, להפיק', value: true, cls: 'primary' }]);
         if (yes) showMorningIssue({ ev: chosen[0], extra: chosen, preIds: chosen.map(e => e.id) });
       }
@@ -2679,21 +3518,25 @@ function showMenu() {
     .map(c => ({ id: c.id, name: calName(c) + (c.primary ? ' (ראשי)' : '') + (['owner', 'writer'].includes(c.accessRole) ? '' : ' (צפייה בלבד)') }))];
   const sh = openSheet(`<h3 style="margin:4px 0 4px">יומן</h3>
     ${opts.map(o => `<label class="radio"><input type="radio" name="cal" value="${esc(o.id)}" ${o.id === S.calId ? 'checked' : ''}>${esc(o.name)}</label>`).join('')}
-    <h3 style="margin:18px 0 4px">מחירים וגיבוי</h3>
+    <h3 style="margin:18px 0 4px">הגדרות</h3>
+    <div class="menu-item"><span style="flex:1">תכונות: מה להציג</span><button class="btn" id="mFeat">בחירה</button></div>
     <div class="menu-item"><span style="flex:1">מטופלים: מחירים ומיילים</span><button class="btn" id="mPrices">עריכה</button></div>
+    ${feat('exercises') ? '<div class="menu-item"><span style="flex:1">ספריית תרגילים לבית</span><button class="btn" id="mEx">עריכה</button></div>' : ''}
+    ${feat('intake') ? '<div class="menu-item"><span style="flex:1">טופס קליטה להורים</span><button class="btn" id="mIntake">קישור</button></div>' : ''}
     <div class="menu-item"><span style="flex:1">מקומות טיפול${(S.settings.locations || []).length ? ` (${S.settings.locations.length})` : ''}</span><button class="btn" id="mLocs">עריכה</button></div>
-    <div class="menu-item"><span style="flex:1">תזכורות למטופלים ותזכורת תשלום ${(S.settings.reminders || {}).enabled ? '✓' : ''}</span><button class="btn" id="mRemind">הגדרה</button></div>
-    <div class="menu-item"><label class="check" style="flex:1"><input type="checkbox" id="mDay" ${store.get('daySummary', true) !== false ? 'checked' : ''}>חלון סימון בסוף היום</label>
-      <select id="mDayHour">${Array.from({ length: 12 }, (_, i) => i + 12).map(h => `<option value="${h}" ${+store.get('daySummaryHour', DAY_SUMMARY_HOUR) === h ? 'selected' : ''}>${pad(h)}:00</option>`).join('')}</select></div>
+    ${feat('reminders') || feat('debts') ? `<div class="menu-item"><span style="flex:1">תזכורות למטופלים ותזכורת תשלום ${(S.settings.reminders || {}).enabled ? '✓' : ''}</span><button class="btn" id="mRemind">הגדרה</button></div>` : ''}
+    <div class="menu-item" ${feat('quickmark') ? '' : 'style="display:none"'}><label class="check" style="flex:1"><input type="checkbox" id="mDay" ${store.get('daySummary', true) !== false ? 'checked' : ''}>חלון סימון בסוף היום</label>
+      <select id="mDayHour" style="flex:none;width:auto">${Array.from({ length: 12 }, (_, i) => i + 12).map(h => `<option value="${h}" ${+store.get('daySummaryHour', DAY_SUMMARY_HOUR) === h ? 'selected' : ''}>${pad(h)}:00</option>`).join('')}</select></div>
     <div class="menu-item"><span style="flex:1">גיבוי</span><button class="btn" id="mBackup">גיבוי עכשיו</button></div>
     <div class="menu-item"><span style="flex:1">קובץ גיבוי</span><button class="btn" id="mExport">ייצוא</button><button class="btn" id="mRestore">שחזור</button></div>
     <label class="check"><input type="checkbox" id="mEmail" ${S.settings.backup_email !== false ? 'checked' : ''}>שליחת הגיבוי היומי למייל</label>
     <div class="menu-item"><label class="check" style="flex:1"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label><button class="btn" id="mHolRefresh">רענון</button></div>
-    <div class="menu-item"><span style="flex:1">Morning – קבלות ${morningReady() ? '✓' : ''}</span><button class="btn" id="mMorning">הגדרה</button></div>
-    <div class="menu-item"><span style="flex:1">הוספת הוצאה ל-Morning</span><button class="btn primary" id="mExpense">📤 העלאה</button></div>
+    ${feat('morning') || feat('expenses') ? `<div class="menu-item"><span style="flex:1">Morning – קבלות ${morningReady() ? '✓' : ''}</span><button class="btn" id="mMorning">הגדרה</button></div>` : ''}
+    ${feat('expenses') ? '<div class="menu-item"><span style="flex:1">הוספת הוצאה ל-Morning</span><button class="btn primary" id="mExpense">📤 העלאה</button></div>' : ''}
     <div class="menu-item"><span style="flex:1">שיתוף מוואטסאפ / מייל לאפליקציה</span><span class="note">${'serviceWorker' in navigator && navigator.serviceWorker.controller ? '✓ מוכן' : '⏳ עוד לא מוכן – סוגרים ופותחים את האפליקציה'}</span></div>
     <h3 style="margin:18px 0 4px">צילומי תשלום</h3>
     <div class="menu-item"><span style="flex:1">מפתח Gemini: ${store.get('geminiKey', '') ? '✓ מוגדר' : 'לא מוגדר'}</span><button class="btn" id="gKeyBtn">${store.get('geminiKey', '') ? 'החלפה' : 'הגדרה'}</button></div>
+    ${feat('usage') ? `<div class="menu-item"><span style="flex:1">שימוש ב-Gemini החודש: כ-${fmtMoney(usageMonth().ils) || '₪0'}${toAmount(S.settings.ai_budget) ? ' מתוך ' + fmtMoney(toAmount(S.settings.ai_budget)) : ''}</span><button class="btn" id="mUsage">פרטים</button></div>` : ''}
     <h3 style="margin:18px 0 4px">חשבון</h3>
     <div class="menu-item"><span style="flex:1" dir="ltr">${esc(S.email || '')}</span></div>
     <div class="actions"><button class="btn danger" id="soBtn">התנתקות</button><button class="btn" id="mClose">סגירה</button></div>
@@ -2703,12 +3546,13 @@ function showMenu() {
   $('#soBtn', sh).onclick = signOut;
   $('#gKeyBtn', sh).onclick = () => askGeminiKey(null);
   $('#mPrices', sh).onclick = showPrices;
-  $('#mRemind', sh).onclick = showReminders;
+  const onc = (id, fn) => { const b = $(id, sh); if (b) b.onclick = fn; };
+  onc('#mRemind', showReminders); onc('#mEx', () => showExercises()); onc('#mIntake', showIntake); onc('#mFeat', showFeatures); onc('#mUsage', showUsage);
   $('#mLocs', sh).onclick = showLocations;
   $('#mDay', sh).onchange = e => store.set('daySummary', e.target.checked);
   $('#mDayHour', sh).onchange = e => { store.set('daySummaryHour', +e.target.value); store.set('daySummaryShown', ''); };
-  $('#mMorning', sh).onclick = () => showMorningSettings(null);
-  $('#mExpense', sh).onclick = () => showExpenses();
+  onc('#mMorning', () => showMorningSettings(null));
+  onc('#mExpense', () => showExpenses());
   $('#mBackup', sh).onclick = () => { closeSheet(); makeBackup(false); };
   $('#mExport', sh).onclick = () => { closeSheet(); exportBackupFile(); };
   $('#mRestore', sh).onclick = showRestore;
@@ -2832,6 +3676,8 @@ function init() {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); checkInbox(); } });
   $('#inboxBtn').onclick = () => { if (S.token && S.calendars.length) showInbox(); };
   setInterval(() => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); } }, 5 * 60 * 1000);
+  setInterval(() => { if (document.visibilityState === 'visible') refreshAlerts(); }, 3 * 60 * 60 * 1000);
+  setInterval(() => { if (document.visibilityState === 'visible') importIntake(); }, 10 * 60 * 1000);
   setInterval(() => { if (S.view === 'day' || S.view === 'week') { const nl = $('.nowline'); if (nl) { renderView.keepScroll = true; renderView(); } } }, 60 * 1000);
   if ('serviceWorker' in navigator && !DEMO && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(r => r.update()).catch(() => {});
