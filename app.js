@@ -4,7 +4,8 @@
 'use strict';
 
 // ------------------------------------------------------------------ קבועים
-const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/gmail.send';
+const SCOPES = 'https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/gmail.send';
+const INBOX_FOLDER = 'יומן הטיפולים – לטיפול', INBOX_DONE = 'טופלו';
 const SCOPE_LIST = SCOPES.split(' ');
 const PAY_KEYS = ['paid', 'pay_method', 'pay_note', 'pay_amount', 'pay_total', 'pay_date', 'pay_ref', 'pay_payer', 'pay_receipt'];
 const RECEIPTS_FOLDER = 'יומן הטיפולים – אישורי תשלום';
@@ -151,18 +152,33 @@ const MORNING_PAY = { cash: 1, bank: 4, bit: 10, paybox: 10, other: 11 };
 const morningCfg = () => ({ ...DEFAULT_MORNING, ...(S.settings.morning || {}) });
 const morningKeys = env => (store.get('morningKeys', {}) || {})[env] || {};
 const morningReady = () => { const k = morningKeys(morningCfg().env); return !!(k.id && k.secret); };
-async function morningCall(env, method, path, body, token) {
+const morningRelay = () => (store.get('morningRelay', '') || '').trim();
+async function relayPost(payload) {
+  // ממסר ב-Google Apps Script: Morning חוסמים פניות ישירות מדפדפן, אז הבקשה עוברת דרך Google
   let r;
-  try {
-    r = await fetch(MORNING_URLS[env] + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
-  } catch (e) {
-    throw new Error('לא הצלחתי להתחבר ל-Morning מהטלפון (ייתכן שהם לא מאפשרים חיבור ישיר מדפדפן). אפשר להפיק את הקבלה מהמחשב, ולשייך כאן קבלה ידנית.');
+  try { r = await fetch(morningRelay(), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload), redirect: 'follow' }); }
+  catch { throw new Error('לא הצלחתי להתחבר לממסר. בודקים שהכתובת בהגדרות Morning נכונה (מסתיימת ב-/exec), ושבפריסה נבחר Who has access: Anyone.'); }
+  let j; try { j = await r.json(); } catch { throw new Error('הממסר לא החזיר תשובה תקינה. בודקים שהכתובת נכונה ושהפריסה היא Web app.'); }
+  return j;
+}
+async function morningCall(env, method, path, body, token) {
+  let status, j = {};
+  if (morningRelay()) {
+    const res = await relayPost({ kind: 'api', url: MORNING_URLS[env] + path, method, body: body || null, token: token || '' });
+    status = res.status; try { j = JSON.parse(res.text || '{}'); } catch { j = { errorMessage: res.text }; }
+  } else {
+    let r;
+    try {
+      r = await fetch(MORNING_URLS[env] + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    } catch (e) {
+      throw new Error('Morning חוסמים חיבור ישיר מהטלפון. כדי להשתמש ב-Morning בטלפון מגדירים ממסר: ☰ ← Morning ← „כתובת ממסר”. בינתיים אפשר להפיק מהמחשב.');
+    }
+    status = r.status; try { j = await r.json(); } catch { /* ignore */ }
   }
-  let j = {}; try { j = await r.json(); } catch { /* ignore */ }
-  if (!r.ok) {
-    const msg = j.errorMessage || j.message || r.status;
-    if (r.status === 401 || r.status === 403) throw new Error(`Morning דחו את החיבור (${r.status}). בודקים את מפתח ה-API ושהמסלול כולל API.\n${msg}`);
-    throw new Error(`שגיאה מ-Morning (${r.status}): ${msg}`);
+  if (status < 200 || status >= 300) {
+    const msg = j.errorMessage || j.message || status;
+    if (status === 401 || status === 403) throw new Error(`Morning דחו את החיבור (${status}). בודקים את מפתח ה-API ושהמסלול כולל API.\n${msg}`);
+    throw new Error(`שגיאה מ-Morning (${status}): ${msg}`);
   }
   return j;
 }
@@ -194,6 +210,11 @@ async function morningUploadExpense(env, blob, name) {
   if (DEMO) { await new Promise(r => setTimeout(r, 300)); Mock.expenses = (Mock.expenses || 0) + 1; return true; }
   const info = await morningCall(env, 'GET', '/expenses/file', null, await morningToken(env));
   if (!info || !info.url) throw new Error('Morning לא החזירו כתובת להעלאת הקובץ.');
+  if (morningRelay()) {
+    const res = await relayPost({ kind: 'upload', url: info.url, fields: info.fields || null, data: await blobToBase64(blob), mime: blob.type || 'application/octet-stream', name });
+    if (res.status < 200 || res.status >= 300) throw new Error(`העלאת הקובץ ל-Morning נכשלה (${res.status}). ${res.text || ''}`);
+    return true;
+  }
   let r;
   if (info.fields && Object.keys(info.fields).length) {
     const fd = new FormData();
@@ -886,6 +907,59 @@ async function handleErr(e) {
   alertSheet('משהו השתבש', e.message || String(e));
 }
 
+// ---- תיבת קלט: מסמכים שהכנסת לתיקייה „יומן הטיפולים – לטיפול” ב-Drive (זהה ל-Windows)
+const Inbox = {
+  async folder() { return AppData.folder(INBOX_FOLDER, null, 'inboxFolder'); },
+  async done() { return AppData.folder(INBOX_DONE, await Inbox.folder(), 'inboxDoneFolder'); },
+  async list() {
+    if (DEMO) return Mock.inbox || (Mock.inbox = [{ id: 'i1', name: 'ביט מיכל.jpg', mimeType: 'image/jpeg', createdTime: new Date().toISOString() }]);
+    const fid = await Inbox.folder();
+    const q = `'${fid}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`;
+    const r = await gfetch('https://www.googleapis.com/drive/v3/files?' + qs({ q, spaces: 'drive', orderBy: 'createdTime', pageSize: 100, fields: 'files(id,name,mimeType,size,createdTime)' }));
+    return (r.files || []).filter(f => /^(image\/|application\/pdf)/.test(f.mimeType || ''));
+  },
+  async move(id) {
+    if (DEMO) { Mock.inbox = (Mock.inbox || []).filter(f => f.id !== id); return; }
+    await gfetch(`https://www.googleapis.com/drive/v3/files/${enc(id)}?` + qs({ addParents: await Inbox.done(), removeParents: await Inbox.folder(), fields: 'id' }), { method: 'PATCH', json: {} });
+  },
+  async download(f) {
+    if (DEMO) { const c = document.createElement('canvas'); c.width = 200; c.height = 300; c.getContext('2d').fillStyle = '#00c2a8'; c.getContext('2d').fillRect(0, 0, 200, 300); return new Promise(r => c.toBlob(r, 'image/jpeg')); }
+    const b = await gfetch(`https://www.googleapis.com/drive/v3/files/${enc(f.id)}?alt=media`, { asBlob: true });
+    return b.type ? b : new Blob([b], { type: f.mimeType });
+  },
+};
+function setInboxCount(n) { const b = $('#inboxBtn'); if (!b) return; $('#inboxCount').textContent = n || ''; $('#inboxCount').hidden = !n; }
+async function checkInbox() { try { setInboxCount((await Inbox.list()).length); } catch { /* ignore */ } }
+async function showInbox() {
+  const sh = openSheet('<h3 style="margin:4px 0 6px">תיבת קלט – מסמכים לטיפול</h3><div class="spinner"></div>');
+  let files;
+  try { files = await Inbox.list(); } catch (e) { closeSheet(); handleErr(e); return; }
+  setInboxCount(files.length);
+  const fid = DEMO ? '' : await Inbox.folder().catch(() => '');
+  sh.innerHTML = `<div class="grip"></div><h3 style="margin:4px 0 6px">תיבת קלט – מסמכים לטיפול</h3>
+    <p class="note">כל תמונה או PDF שמכניסים לתיקייה „${INBOX_FOLDER}” ב-Google Drive מופיעים כאן – משיתוף מוואטסאפ ל-Drive, משמירת קובץ מצורף מהמייל, או מהמחשב. אחרי הטיפול הקובץ עובר ל„${INBOX_DONE}”.</p>
+    ${files.length ? files.map((f, i) => `<div class="card" style="margin:8px 0;padding:10px"><b>${esc(f.name)}</b><div class="note">${dmy(new Date(f.createdTime))} ${hm(new Date(f.createdTime))} · ${/pdf/.test(f.mimeType) ? 'PDF' : 'תמונה'}</div>
+      <div class="actions" style="margin-top:8px"><button class="btn primary" data-pay="${i}">₪ אישור תשלום</button><button class="btn" data-exp="${i}">📤 הוצאה</button><button class="btn" data-done="${i}">✓ טופל</button></div></div>`).join('') : '<p class="empty">אין מסמכים שממתינים לטיפול. 🎉</p>'}
+    <div class="actions">${fid ? `<a class="btn" style="text-align:center;text-decoration:none" target="_blank" rel="noopener" href="https://drive.google.com/drive/folders/${esc(fid)}">פתיחת התיקייה ב-Drive</a>` : ''}<button class="btn" id="ibClose">סגירה</button></div>`;
+  $('#ibClose', sh).onclick = closeSheet;
+  const finished = async f => { busy(true); try { await Inbox.move(f.id); toast('✓ הקובץ עבר ל„טופלו”'); } catch (e) { handleErr(e); } finally { busy(false); checkInbox(); } };
+  const load = async f => { busy(true); try { return await Inbox.download(f); } finally { busy(false); } };
+  sh.querySelectorAll('[data-done]').forEach(b => b.onclick = async () => { await finished(files[+b.dataset.done]); showInbox(); });
+  sh.querySelectorAll('[data-pay]').forEach(b => b.onclick = async () => {
+    const f = files[+b.dataset.pay];
+    try { const blob = await load(f); startReceipt(blob, () => finished(f)); } catch (e) { handleErr(e); }
+  });
+  sh.querySelectorAll('[data-exp]').forEach(b => b.onclick = async () => {
+    const f = files[+b.dataset.exp];
+    if (!morningReady()) { showMorningSettings(showInbox); return; }
+    const ok = await choose('הוצאה ל-Morning', `להעלות את „${f.name}” ל-Morning כהוצאה?` + (morningCfg().env === 'sandbox' ? '\n\n(סביבת בדיקות)' : ''), [{ label: 'כן, להעלות', value: true, cls: 'primary' }]);
+    if (!ok) { showInbox(); return; }
+    busy(true);
+    try { const blob = await Inbox.download(f); await morningUploadExpense(morningCfg().env, blob, f.name); toast(`✓ „${f.name}” הועלה ל-Morning`); await Inbox.move(f.id); }
+    catch (e) { handleErr(e); return; } finally { busy(false); }
+    checkInbox(); showInbox();
+  });
+}
 async function handleDocument(file) {
   // מסמך שנבחר או שותף: אישור תשלום של מטופל/ת, או הוצאה שלי ל-Morning
   const kind = await choose('מה המסמך הזה?', '', [{ label: '₪ אישור תשלום של מטופל/ת', value: 'pay', cls: 'primary' }, { label: '📤 הוצאה שלי – להעלות ל-Morning', value: 'expense' }]);
@@ -917,6 +991,7 @@ async function loadCalendars() {
     takeSharedImage();
     loadSettings().then(maybeAutoBackup);
     loadIndex();
+    checkInbox();
   } catch (e) { handleErr(e); }
   finally { busy(false); }
 }
@@ -972,7 +1047,7 @@ function loginHtml() {
     <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="#2F6F66" stroke-width="1.6"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="M8.5 15l2.2 2.2L15.5 13"/></svg>
     <h2>יומן הטיפולים</h2>
     <p class="muted">מתחברים עם חשבון Google. הסיסמה נכתבת רק בדף ההתחברות של Google.</p>
-    ${S.needConsent ? '<p class="card" style="text-align:right">בעדכון האחרון נוספו הרשאות חדשות (שמירת צילומים וגיבויים ב-Google Drive ושליחת הגיבוי היומי למייל). לכן צריך להתחבר שוב פעם אחת ולסמן את <b>כל</b> התיבות במסך ההרשאות.</p>' : ''}
+    ${S.needConsent ? '<p class="card" style="text-align:right">בעדכון האחרון נוספו הרשאות חדשות (Google Drive: תיבת קלט לקבצים, צילומים וגיבויים; שליחת הגיבוי היומי למייל). לכן צריך להתחבר שוב פעם אחת ולסמן את <b>כל</b> התיבות במסך ההרשאות.</p>' : ''}
     <button class="btn primary" id="loginBtn" style="width:100%;max-width:320px;padding:14px">התחברות עם Google</button>
     <p class="err" id="loginErr"></p>
     <p class="note" style="margin-top:30px"><a href="#" id="resetCid">שינוי Client ID</a></p>
@@ -1461,6 +1536,8 @@ function showMorningSettings(then) {
   const sh = openSheet(`<h3 style="margin:4px 0 6px">Morning – חיבור והגדרות קבלות</h3>
     <p class="note">המפתחות נוצרים ב-Morning: אזור אישי ← כלים למפתחים ← מפתחות API. הם נשמרים רק בטלפון הזה. מומלץ להתחיל בסביבת הבדיקות.</p>
     <div class="field"><label>סביבה</label><select id="moEnv"><option value="sandbox" ${m.env === 'sandbox' ? 'selected' : ''}>סביבת בדיקות (sandbox) – בלי מסמכים אמיתיים</option><option value="production" ${m.env === 'production' ? 'selected' : ''}>פעיל – מסמכים אמיתיים</option></select></div>
+    <div class="field"><label>כתובת ממסר (נדרש בטלפון)</label><input type="url" dir="ltr" id="moRelay" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(morningRelay())}">
+      <p class="note">Morning חוסמים חיבור ישיר מהטלפון, ולכן הבקשות עוברות דרך ממסר קטן ב-Google Apps Script בחשבון שלך (לפי המדריך).</p></div>
     <div class="field"><label>מזהה מפתח (ID)</label><input type="text" dir="ltr" id="moId" autocomplete="off"></div>
     <div class="field"><label>מפתח סודי (Secret)</label><input type="text" dir="ltr" id="moSecret" autocomplete="off" style="-webkit-text-security:disc"></div>
     <div class="field"><label>תיאור השירות</label><input type="text" id="moItem" value="${esc(m.item)}"></div>
@@ -1477,13 +1554,13 @@ function showMorningSettings(then) {
   load();
   $('#moEnv', sh).onchange = e => { keep(); env = e.target.value; load(); $('#moRes', sh).textContent = ''; };
   $('#moTest', sh).onclick = async () => {
-    keep(); store.set('morningKeys', k); $('#moRes', sh).textContent = 'בודק…';
+    keep(); store.set('morningKeys', k); store.set('morningRelay', $('#moRelay', sh).value.trim()); $('#moRes', sh).textContent = 'בודק…';
     try { const me = await morningMe(env); $('#moRes', sh).textContent = '✓ החיבור עובד' + ((me.businessName || me.firstName) ? ' – ' + (me.businessName || me.firstName) : ''); }
     catch (e) { $('#moRes', sh).textContent = '⚠ ' + e.message; }
   };
   $('#moCancel', sh).onclick = closeSheet;
   $('#moSave', sh).onclick = async () => {
-    keep(); store.set('morningKeys', k);
+    keep(); store.set('morningKeys', k); store.set('morningRelay', $('#moRelay', sh).value.trim());
     await saveSettings({ ...S.settings, morning: { env, item: $('#moItem', sh).value.trim() || DEFAULT_MORNING.item, template: $('#moTpl', sh).value.trim(), vat_included: $('#moVat', sh).checked, send_email: $('#moSend', sh).checked } });
     closeSheet(); if (then) then();
   };
@@ -1802,7 +1879,7 @@ async function viewReceipt(ev) {
 }
 
 // ---- עדכון תשלום מצילום
-async function startReceipt(file) {
+async function startReceipt(file, onSaved = null) {
   if (!S.token || !S.calendars.length) { toast('קודם מתחברים ליומן'); return; }
   if (!DEMO && !store.get('geminiKey', '')) { askGeminiKey(() => startReceipt(file)); return; }
   const blob = await shrinkImage(file);
@@ -1813,10 +1890,10 @@ async function startReceipt(file) {
     const info = await geminiRead(blob);
     const day = info.date && /^\d{4}-\d{2}-\d{2}$/.test(info.date) ? parseDateOnly(info.date) : today();
     const events = await G.eventsMany(writable(), addDays(day, -75), addDays(day, 2));
-    showReceiptMatch(blob, url, info, matchReceipt(info, events));
+    showReceiptMatch(blob, url, info, matchReceipt(info, events), onSaved);
   } catch (e) { closeSheet(); handleErr(e); }
 }
-function showReceiptMatch(blob, url, info, matches) {
+function showReceiptMatch(blob, url, info, matches, onSaved = null) {
   const amt0 = toAmount(info.amount);
   const opts = matches.filter(m => m.unpaid.length || m.score > 0);
   let cur = matches.length && matches[0].score > 0 ? matches[0].name : '';
@@ -1879,6 +1956,7 @@ function showReceiptMatch(blob, url, info, matches) {
       }
       URL.revokeObjectURL(url); closeSheet();
       toast(`✓ התשלום נשמר ב-Google (${n === 1 ? 'פגישה אחת' : n + ' פגישות'}), כולל הצילום`);
+      if (onSaved) onSaved();
       changed();
     } catch (e) { btn.disabled = false; btn.textContent = 'שמירה'; handleErr(e); }
   };
@@ -2325,7 +2403,8 @@ function init() {
   $('#fab').onclick = () => showNewMenu();
   $('#sheetBack').onclick = closeSheet;
   document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => setView(b.dataset.view));
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); checkInbox(); } });
+  $('#inboxBtn').onclick = () => { if (S.token && S.calendars.length) showInbox(); };
   setInterval(() => { if (document.visibilityState === 'visible' && S.token && S.calendars.length && $('#sheet').hidden) { renderView.keepScroll = true; loadEvents(); } }, 5 * 60 * 1000);
   setInterval(() => { if (S.view === 'day' || S.view === 'week') { const nl = $('.nowline'); if (nl) { renderView.keepScroll = true; renderView(); } } }, 60 * 1000);
   if ('serviceWorker' in navigator && !DEMO && location.protocol === 'https:') {

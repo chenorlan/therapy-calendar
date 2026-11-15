@@ -1,7 +1,11 @@
 // שומר את קבצי האפליקציה כדי שתיפתח מהר. הנתונים עצמם תמיד נטענים מ-Google.
-const CACHE = 'therapy-calendar-v17';
+const CACHE = 'therapy-calendar-v21';
 const FILES = ['./', 'index.html', 'app.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
-self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); self.skipWaiting(); });
+// התקנה לא נכשלת גם אם קובץ אחד לא נטען – אחרת השיתוף לאפליקציה לא יעבוד
+self.addEventListener('install', e => {
+  self.skipWaiting();
+  e.waitUntil(caches.open(CACHE).then(c => Promise.all(FILES.map(f => c.add(f).catch(() => {})))));
+});
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== 'therapy-calendar-share').map(k => caches.delete(k)))));
   self.clients.claim();
