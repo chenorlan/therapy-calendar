@@ -189,6 +189,51 @@ async function morningMe(env) {
   }
   return {};
 }
+async function morningUploadExpense(env, blob, name) {
+  // מסמך הוצאה (קבלה / חשבונית מספק): Morning קוראים אותו ויוצרים טיוטת הוצאה (זהה ל-Windows)
+  if (DEMO) { await new Promise(r => setTimeout(r, 300)); Mock.expenses = (Mock.expenses || 0) + 1; return true; }
+  const info = await morningCall(env, 'GET', '/expenses/file', null, await morningToken(env));
+  if (!info || !info.url) throw new Error('Morning לא החזירו כתובת להעלאת הקובץ.');
+  let r;
+  if (info.fields && Object.keys(info.fields).length) {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(info.fields)) fd.append(k, v);
+    fd.append('file', blob, name);
+    r = await fetch(info.url, { method: 'POST', body: fd });
+  } else r = await fetch(info.url, { method: 'PUT', body: blob, headers: { 'Content-Type': blob.type || 'application/octet-stream' } });
+  if (!r.ok) throw new Error(`העלאת הקובץ ל-Morning נכשלה (${r.status}).`);
+  return true;
+}
+function showExpenses(initial = []) {
+  if (!morningReady()) { showMorningSettings(() => showExpenses(initial)); return; }
+  const m = morningCfg();
+  let files = [...initial];
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">הוספת הוצאה ל-Morning</h3>
+    ${m.env === 'sandbox' ? '<p class="note" style="background:#FFF1D6;color:#7A4B00;padding:6px 8px;border-radius:8px">סביבת בדיקות: ההוצאה תעלה לחשבון הבדיקות, לא לחשבון האמיתי.</p>' : ''}
+    <p>בוחרים קבלות או חשבוניות על הוצאות (צילום או PDF). Morning קוראים כל מסמך ויוצרים ממנו טיוטת הוצאה, שמופיעה ב-Morning תחת „הוצאות” לבדיקה ואישור.</p>
+    <label class="btn" style="display:block;text-align:center">📷 צילום / בחירת קבצים<input type="file" accept="image/*,application/pdf" multiple id="exFiles" hidden></label>
+    <div id="exList" style="margin:8px 0"></div>
+    <label class="check"><input type="checkbox" id="exDrive" checked>לשמור עותק גם ב-Google Drive</label>
+    <p class="note" id="exStatus" style="white-space:pre-line"></p>
+    <div class="actions"><button class="btn primary" id="exGo">העלאה ל-Morning</button><button class="btn" id="exClose">סגירה</button></div>`);
+  const draw = () => { $('#exList', sh).innerHTML = files.map(f => `<div class="menu-item" style="padding:8px 4px">${esc(f.name || 'צילום')} · ${Math.max(1, Math.round(f.size / 1024))} KB</div>`).join('') || '<p class="note">לא נבחרו קבצים.</p>'; };
+  draw();
+  $('#exFiles', sh).onchange = async e => { for (const f of e.target.files) files.push(f.type.startsWith('image/') ? new File([await shrinkImage(f)], f.name, { type: f.type === 'image/png' ? 'image/png' : 'image/jpeg' }) : f); e.target.value = ''; draw(); };
+  $('#exClose', sh).onclick = closeSheet;
+  $('#exGo', sh).onclick = async () => {
+    if (!files.length) { $('#exStatus', sh).textContent = 'לא נבחרו קבצים.'; return; }
+    const btn = $('#exGo', sh); btn.disabled = true; $('#exStatus', sh).textContent = 'מעלה…';
+    const done = [], failed = [], toDrive = $('#exDrive', sh).checked;
+    for (const f of files) {
+      const name = f.name || `הוצאה ${isoDate(today())}.jpg`;
+      try { await morningUploadExpense(m.env, f, name); done.push(f); }
+      catch (e) { failed.push(`• ${name}: ${e.message}`); continue; }
+      if (toDrive) { try { const id = await AppData.folder('יומן הטיפולים – הוצאות', null, 'expensesFolder'); if (!DEMO) await multipartUpload({ name, parents: [id] }, f); } catch { /* ignore */ } }
+    }
+    files = files.filter(f => !done.includes(f)); draw(); btn.disabled = false;
+    $('#exStatus', sh).textContent = `✓ הועלו ${done.length} מסמכים ל-Morning. הם יופיעו שם תחת „הוצאות” כטיוטות לבדיקה (לפעמים אחרי דקה).` + (failed.length ? '\n\n⚠ לא הועלו:\n' + failed.join('\n') : '');
+  };
+}
 async function morningCreate(env, body) {
   if (DEMO) { await new Promise(r => setTimeout(r, 400)); return { id: 'demodoc', number: 10045, url: { he: '#' } }; }
   return morningCall(env, 'POST', '/documents', body, await morningToken(env));
@@ -851,7 +896,10 @@ async function takeSharedImage() {
     if (!r) return;
     await cache.delete('shared-receipt');
     const blob = await r.blob();
-    startReceipt(blob);
+    // מה זה המסמך ששותף?
+    const kind = await choose('מה לעשות עם המסמך?', '', [{ label: '₪ אישור תשלום של מטופל/ת', value: 'pay', cls: 'primary' }, { label: '📤 הוצאה שלי – להעלות ל-Morning', value: 'expense' }]);
+    if (kind === 'pay') startReceipt(blob);
+    else if (kind === 'expense') showExpenses([new File([blob], `הוצאה ${isoDate(today())}.${(blob.type || '').includes('pdf') ? 'pdf' : 'jpg'}`, { type: blob.type || 'image/jpeg' })]);
   } catch { /* ignore */ }
 }
 async function loadCalendars() {
@@ -2140,6 +2188,7 @@ function showMenu() {
     <label class="check"><input type="checkbox" id="mEmail" ${S.settings.backup_email !== false ? 'checked' : ''}>שליחת הגיבוי היומי למייל</label>
     <div class="menu-item"><label class="check" style="flex:1"><input type="checkbox" id="mHol" ${S.settings.holidays !== false ? 'checked' : ''}>חגי ישראל ביומן</label><button class="btn" id="mHolRefresh">רענון</button></div>
     <div class="menu-item"><span style="flex:1">Morning – קבלות ${morningReady() ? '✓' : ''}</span><button class="btn" id="mMorning">הגדרה</button></div>
+    <div class="menu-item"><span style="flex:1">הוספת הוצאה ל-Morning</span><button class="btn primary" id="mExpense">📤 העלאה</button></div>
     <h3 style="margin:18px 0 4px">צילומי תשלום</h3>
     <div class="menu-item"><span style="flex:1">מפתח Gemini: ${store.get('geminiKey', '') ? '✓ מוגדר' : 'לא מוגדר'}</span><button class="btn" id="gKeyBtn">${store.get('geminiKey', '') ? 'החלפה' : 'הגדרה'}</button></div>
     <h3 style="margin:18px 0 4px">חשבון</h3>
@@ -2151,6 +2200,7 @@ function showMenu() {
   $('#gKeyBtn', sh).onclick = () => askGeminiKey(null);
   $('#mPrices', sh).onclick = showPrices;
   $('#mMorning', sh).onclick = () => showMorningSettings(null);
+  $('#mExpense', sh).onclick = () => showExpenses();
   $('#mBackup', sh).onclick = () => { closeSheet(); makeBackup(false); };
   $('#mExport', sh).onclick = () => { closeSheet(); exportBackupFile(); };
   $('#mRestore', sh).onclick = showRestore;

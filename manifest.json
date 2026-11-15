@@ -39,7 +39,8 @@
         {
           "name": "image",
           "accept": [
-            "image/*"
+            "image/*",
+            "application/pdf"
           ]
         }
       ]
