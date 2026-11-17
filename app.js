@@ -1,4 +1,4 @@
-const APP_VERSION = '39';
+const APP_VERSION = '41';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -1173,7 +1173,7 @@ function renderView() {
   if (!S.loaded) { main.innerHTML = '<div class="spinner"></div>'; return; }
   const scroll = main.scrollTop;
   if (S.view === 'day') main.innerHTML = timeGridHtml([S.anchor]);
-  else if (S.view === 'week') { const ws = weekStart(S.anchor); main.innerHTML = timeGridHtml(Array.from({ length: 7 }, (_, i) => addDays(ws, i))); }
+  else if (S.view === 'week') { const ws = weekStart(S.anchor), wd = weekDays(); main.innerHTML = timeGridHtml(Array.from({ length: 7 }, (_, i) => addDays(ws, i)).filter(d => wd.includes(d.getDay()))); }
   else if (S.view === 'month') main.innerHTML = monthHtml();
   else if (S.view === 'list') main.innerHTML = listHtml();
   else main.innerHTML = summaryHtml();
@@ -1251,8 +1251,9 @@ function timeGridHtml(days) {
 
 // ---- חודש
 function monthHtml() {
-  const days = monthDays(), td = today(), m = S.anchor.getMonth();
-  let h = '<div class="mo-head">' + DAYS_S.map(d => `<div>${d}</div>`).join('') + '</div><div class="mo-grid">';
+  const wd = weekDays(), days = monthDays().filter(d => wd.includes(d.getDay())), td = today(), m = S.anchor.getMonth();
+  const gc = `style="grid-template-columns:repeat(${wd.length}, 1fr)"`;
+  let h = `<div class="mo-head" ${gc}>` + wd.map(i => `<div>${DAYS_S[i]}</div>`).join('') + `</div><div class="mo-grid" ${gc}>`;
   for (const d of days) {
     const evs = S.events.filter(ev => { const t = evTimes(ev); return t.allDay ? (t.s <= d && d < (t.e > t.s ? t.e : addDays(t.s, 1))) : sameDay(t.s, d); });
     const shown = evs.length > 4 ? evs.slice(0, 3) : evs;
@@ -1403,11 +1404,26 @@ function bindView() {
   const mb = $('#morningBtn'); if (mb) mb.onclick = () => showMorningIssue({ client: S.sumClient || null, extra: S.events });
   const pb = $('#pdfBtn'); if (pb) pb.onclick = () => window.print();
 }
+// ימים שמוצגים ביומן (0 = ראשון … 6 = שבת), ברירת מחדל: בלי שבת – זהה ל-Windows
+const DEFAULT_WEEK_DAYS = [0, 1, 2, 3, 4, 5];
+const weekDays = () => { const d = [...new Set((S.settings.week_days || DEFAULT_WEEK_DAYS).map(Number).filter(x => x >= 0 && x <= 6))].sort(); return d.length ? d : [0, 1, 2, 3, 4, 5, 6]; };
+function showWeekDays() {
+  const cur = weekDays();
+  const sh = openSheet(`<h3 style="margin:4px 0 6px">ימים שמוצגים ביומן</h3><p class="note">אילו ימים להציג בתצוגת שבוע וחודש? (פגישות בימים מוסתרים לא נמחקות)</p>
+    ${DAYS.map((d, i) => `<label class="check"><input type="checkbox" data-wd="${i}" ${cur.includes(i) ? 'checked' : ''}>${d}</label>`).join('')}
+    <p class="err" id="wdErr"></p><div class="actions"><button class="btn primary" id="wdSave">שמירה</button><button class="btn" id="wdCancel">ביטול</button></div>`);
+  $('#wdCancel', sh).onclick = closeSheet;
+  $('#wdSave', sh).onclick = async () => {
+    const days = [...sh.querySelectorAll('[data-wd]')].filter(c => c.checked).map(c => +c.dataset.wd);
+    if (!days.length) { $('#wdErr', sh).textContent = 'צריך לבחור לפחות יום אחד.'; return; }
+    closeSheet(); await saveSettings({ ...S.settings, week_days: days }); renderView();
+  };
+}
 function goDay(d) { S.anchor = d; setView('day'); }
 function setView(v) { S.view = v; store.set('view', v); S.loaded = false; renderView(); loadEvents(); }
 function step(dir) {
   const a = S.anchor;
-  if (S.view === 'day') S.anchor = addDays(a, dir);
+  if (S.view === 'day') { const wd = weekDays(); let d = a; for (let i = 0; i < 7; i++) { d = addDays(d, dir); if (wd.includes(d.getDay())) break; } S.anchor = d; }
   else if (S.view === 'week' || S.view === 'list' || sumWeekly()) S.anchor = addDays(a, 7 * dir);
   else S.anchor = new Date(a.getFullYear(), a.getMonth() + dir, 1);
   S.loaded = false; renderView(); loadEvents();
@@ -1984,6 +2000,7 @@ function showClientFile(name) {
   const loc = (ss.slice().reverse().find(e => e.location) || {}).location;
   const facts = [`התקיימו ${held} · בוטלו ${canc} · עתידיים ${fut}`];
   if (clientPrice(name)) facts.push('מחיר: ' + fmtMoney(clientPrice(name)));
+  if (info.parent_phone) facts.push('טלפון הורה: ' + ltr(esc(info.parent_phone)));
   if (info.phone) facts.push('טלפון: ' + ltr(esc(info.phone)));
   if ((info.emails || []).length) facts.push('מייל: ' + esc(info.emails.join(', ')));
   if ((info.payers || []).length) facts.push('משלמים: ' + esc(info.payers.join(', ')));
@@ -1999,7 +2016,7 @@ function showClientFile(name) {
       ${feat('exercises') && p.homework ? `<div class="note">📚 ${esc(p.homework)}</div>` : ''}</div>`; };
   const sh = openSheet(`<h3 style="margin:4px 0 6px">📁 ${esc(name)}</h3>
     <p style="line-height:1.6">${facts.join('<br>')}</p>
-    <div class="seg">${feat('summary') ? '<button class="btn" id="cfSum">📄 סיכום טיפול (AI)</button>' : ''}${feat('docs') ? '<button class="btn" id="cfDocs">📎 מסמכים</button>' : ''}
+    <div class="seg"><button class="btn" id="cfPhone">📞 טלפון הורה</button>${feat('summary') ? '<button class="btn" id="cfSum">📄 סיכום טיפול (AI)</button>' : ''}${feat('docs') ? '<button class="btn" id="cfDocs">📎 מסמכים</button>' : ''}
       ${feat('debts') && debt ? '<button class="btn" id="cfRem">📨 תזכורת תשלום</button>' : ''}${feat('makeups') && due.length ? '<button class="btn" id="cfMk">↺ קביעת השלמה</button>' : ''}${feat('export') ? '<button class="btn" id="cfPdf">🖨 ייצוא ל-PDF</button>' : ''}</div>
     ${(() => { const up = ss.filter(e => evTimes(e).s > now && attended(e) !== 'no').slice(0, 3);
       return up.length ? `<div class="sec">הטיפולים הקרובים</div>${up.map(row).join('')}` : ''; })()}
@@ -2007,7 +2024,8 @@ function showClientFile(name) {
     <div class="actions"><button class="btn" id="cfClose">סגירה</button></div>`);
   sh.querySelectorAll('[data-open]').forEach(c => c.onclick = () => { const e = allKnown().find(x => x.id === c.dataset.open); if (e) showDetails(e); });
   const on = (id, fn) => { const b = $(id, sh); if (b) b.onclick = fn; };
-  on('#cfSum', () => showSummary(name)); on('#cfDocs', () => showClientDocs(name));
+  on('#cfSum', () => showSummary(name));
+  on('#cfPhone', async () => { const t = prompt(`טלפון ההורה של ${name} (לקבלות ולתזכורות בוואטסאפ):`, clientPhone(name)); if (t !== null) { await saveClientPhone(name, t); showClientFile(name); } }); on('#cfDocs', () => showClientDocs(name));
   on('#cfRem', () => showPayReminder(debt, true)); on('#cfPdf', () => exportClient(name)); on('#cfMk', () => scheduleMakeup(due[0]));
   $('#cfClose', sh).onclick = closeSheet;
 }
@@ -3415,7 +3433,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
   const cals = writable();
   const curCal = S.calendars.find(c => c.id === S.calId);
   const defCal = curCal && cals.includes(curCal) ? curCal.id : (primaryCal() || cals[0] || {}).id;
-  let rem = 30;
+  let rem = 0;  // ברירת מחדל: בלי תזכורת (זהה ל-Windows)
   if (editing) { const o = (ev.reminders && ev.reminders.overrides) || []; if (o.length) rem = o[0].minutes; else if (ev.reminders && ev.reminders.useDefault === false) rem = 0; }
   const remOpts = REMINDERS.some(r => r[0] === rem) ? REMINDERS : [...REMINDERS, [rem, `${rem} דק׳ לפני`]].sort((a, b) => a[0] - b[0]);
   let count = isClient ? 0 : 10, repeatLabel = 'חוזר כל שבוע', repeatNote = '';
@@ -3445,6 +3463,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
       <div class="field"><label>שעת סיום <span id="fLen" class="note"></span></label>${timeInput('fEnd', e)}</div></div>
     <div class="field"><label>מיקום</label><input type="text" id="fLoc" list="locList" placeholder="בוחרים מהרשימה או כותבים מקום אחר" value="${esc(editing ? ev.location || '' : '')}">${locList()}</div>
     <div class="field" ${isEv ? 'hidden' : ''}><label>מחיר (₪) <span class="note" id="fPriceNote"></span></label><input type="text" inputmode="decimal" dir="ltr" id="fPrice" placeholder="לא חובה"></div>
+    <div class="field" ${isEv ? 'hidden' : ''} id="fPhoneBox"><label>טלפון הורה <span class="note">(לקבלות ולתזכורות בוואטסאפ)</span></label><input type="tel" dir="ltr" id="fPhone" placeholder="050-1234567"></div>
     ${!editing && !isEv ? `<div class="field"><label class="check"><input type="checkbox" id="fInvite">לשלוח זימון ליומן של:</label>
       <input type="email" dir="ltr" id="fEmails" placeholder="מייל של המטופל/ת או ההורה"></div>` : ''}
     ${showRepeat ? `<div class="field"><label>חזרה</label><div class="two" style="align-items:center">
@@ -3477,10 +3496,12 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
   let priceTouched = false;
   const own = editing ? toAmount(((mode === 'series' && master ? master : ev).extendedProperties || {}).private?.price) : null;
   if (own) { fp.value = own; priceTouched = true; }
-  let inviteFor = null;
+  let inviteFor = null, phoneTouched = false;
+  $('#fPhone', sh).oninput = () => { phoneTouched = true; };
   const prefill = () => {
     if (isEv) return;
     const name = fn.value.trim(), known = name in (S.settings.clients || {}), pr = clientPrice(name);
+    if (!phoneTouched) $('#fPhone', sh).value = name ? clientPhone(name) : '';
     if (!editing && inviteFor !== name) { inviteFor = name; $('#fEmails', sh).value = clientEmails(name).join(', '); $('#fInvite', sh).checked = clientInvites(name); }
     if (!priceTouched) fp.value = pr || '';
     fpn.textContent = !name ? '' : known ? '(מחיר המטופל/ת)' : editing ? '' : '(מטופל/ת חדש/ה · יישמר כברירת מחדל)';
@@ -3492,6 +3513,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
   prefill();
   if (wait && wait.email && !editing && !isEv) $('#fEmails', sh).value = wait.email;
   if (wait && wait.location) $('#fLoc', sh).value = wait.location;
+  if (wait && wait.phone) { $('#fPhone', sh).value = wait.phone; phoneTouched = true; }
   const wk = $('#fWeekly', sh), cnt = $('#fCount', sh);
   if (wk && mode !== 'series') wk.onchange = () => { cnt.disabled = !wk.checked; };
   let remTouched = false, cntTouched = false;
@@ -3499,7 +3521,7 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
   if (cnt) cnt.addEventListener('change', () => { cntTouched = true; });
   $('#fCancel', sh).onclick = () => { if (editing) showDetails(ev); else closeSheet(); };
   $('#fSave', sh).onclick = async () => {
-    const name = $('#fName', sh).value.trim();
+    const name = $('#fName', sh).value.trim(), phone = isEv ? '' : $('#fPhone', sh).value.trim();
     if (!name) { $('#fErr', sh).textContent = isEv ? 'יש למלא כותרת.' : 'יש למלא את שם המטופל/ת.'; return; }
     if (isClient && !editing && names.includes(name)) {
       const go = await choose('מטופל/ת חדש/ה', `כבר יש ביומן מטופל/ת בשם „${name}”. להוסיף בכל זאת?`, [{ label: 'כן, להוסיף', value: true, cls: 'primary' }]);
@@ -3585,19 +3607,28 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
         if (price && !('price' in info) && !(name in (S.settings.clients || {}))) info.price = price;
         if (emails.length) info.emails = emails;
         if (emails.length || info.invite) { if (invite) info.invite = true; else delete info.invite; }
-        if (wait && wait.phone && !info.parent_phone) info.parent_phone = wait.phone;  // בטופס הקליטה ממלא ההורה
+        if (phone && phone !== clientPhone(name)) info.parent_phone = phone;
         const wl = (S.settings.waitlist || []).filter(x => !wait || x.id !== wait.id);
         const st = { ...S.settings, waitlist: wl, locations: [...(S.settings.locations || [])], clients: { ...(S.settings.clients || {}), [name]: info } };
         const newLoc = addLocation(st, body.location);
         if (JSON.stringify(info) !== before || wl.length !== (S.settings.waitlist || []).length || newLoc) saveSettings(st);
         if (invite) toast(`נוספה פגישה: ${name} · נשלח זימון`);
-      }
+      } else if (!isEv && phoneTouched) saveClientPhone(name, phone);
       changed();
     } catch (err) { if (btn) { btn.disabled = false; btn.textContent = editing ? 'שמירה' : 'הוספה'; } handleErr(err); }
     finally { if (!btn) busy(false); }
   };
 }
 
+async function saveClientPhone(name, phone) {
+  // טלפון ההורה של המטופל/ת (לוואטסאפ: קבלות, תזכורות) – זהה ל-Windows
+  name = (name || '').trim(); phone = (phone || '').trim();
+  if (!name || phone === clientPhone(name)) return;
+  const st = JSON.parse(JSON.stringify(S.settings)); st.clients = st.clients || {};
+  const info = st.clients[name] = st.clients[name] || {};
+  if (phone) info.parent_phone = phone; else { delete info.parent_phone; delete info.phone; }
+  await saveSettings(st);
+}
 async function editEvent(ev) {
   let mode = 'single';
   if (ev.recurringEventId) {
@@ -3686,6 +3717,7 @@ function showMenu() {
     <div class="menu-item"><span style="flex:1">מטופלים: מחירים ומיילים</span><button class="btn" id="mPrices">עריכה</button></div>
     ${feat('exercises') ? '<div class="menu-item"><span style="flex:1">ספריית תרגילים לבית</span><button class="btn" id="mEx">עריכה</button></div>' : ''}
     ${feat('intake') ? '<div class="menu-item"><span style="flex:1">טופס קליטה להורים</span><button class="btn" id="mIntake">קישור</button></div>' : ''}
+    <div class="menu-item"><span style="flex:1">ימים שמוצגים ביומן</span><button class="btn" id="mWeekDays">בחירה</button></div>
     <div class="menu-item"><span style="flex:1">מקומות טיפול${(S.settings.locations || []).length ? ` (${S.settings.locations.length})` : ''}</span><button class="btn" id="mLocs">עריכה</button></div>
     ${feat('reminders') || feat('debts') ? `<div class="menu-item"><span style="flex:1">תזכורות למטופלים ותזכורת תשלום ${(S.settings.reminders || {}).enabled ? '✓' : ''}</span><button class="btn" id="mRemind">הגדרה</button></div>` : ''}
     <div class="menu-item" ${feat('quickmark') ? '' : 'style="display:none"'}><label class="check" style="flex:1"><input type="checkbox" id="mDay" ${store.get('daySummary', true) !== false ? 'checked' : ''}>חלון סימון בסוף היום</label>
@@ -3710,7 +3742,7 @@ function showMenu() {
   $('#gKeyBtn', sh).onclick = () => askGeminiKey(null);
   $('#mPrices', sh).onclick = showPrices;
   const onc = (id, fn) => { const b = $(id, sh); if (b) b.onclick = fn; };
-  onc('#mRemind', showReminders); onc('#mEx', () => showExercises()); onc('#mIntake', showIntake); onc('#mFeat', showFeatures); onc('#mUsage', showUsage);
+  onc('#mRemind', showReminders); onc('#mWeekDays', showWeekDays); onc('#mEx', () => showExercises()); onc('#mIntake', showIntake); onc('#mFeat', showFeatures); onc('#mUsage', showUsage);
   $('#mLocs', sh).onclick = showLocations;
   $('#mDay', sh).onchange = e => store.set('daySummary', e.target.checked);
   $('#mDayHour', sh).onchange = e => { store.set('daySummaryHour', +e.target.value); store.set('daySummaryShown', ''); };
