@@ -1,4 +1,4 @@
-const APP_VERSION = '43';
+const APP_VERSION = '44';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -175,8 +175,8 @@ const morningRelay = () => (store.get('morningRelay', '') || '').trim();
 async function relayPost(payload) {
   // ממסר ב-Google Apps Script: Morning חוסמים פניות ישירות מדפדפן, אז הבקשה עוברת דרך Google
   let r;
-  try { r = await fetch(morningRelay(), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload), redirect: 'follow' }); }
-  catch { throw new Error('לא הצלחתי להתחבר לממסר. בודקים שהכתובת בהגדרות Morning נכונה (מסתיימת ב-/exec), ושבפריסה נבחר Who has access: Anyone.'); }
+  try { r = await fetchT(morningRelay(), { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload), redirect: 'follow' }, 60000); }
+  catch (e) { if (e.timeout) throw new Error('הממסר לא ענה תוך דקה. כדאי לבדוק באתר Morning אם הקבלה בכל זאת הופקה, לפני שמנסים שוב.'); throw new Error('לא הצלחתי להתחבר לממסר. בודקים שהכתובת בהגדרות Morning נכונה (מסתיימת ב-/exec), ושבפריסה נבחר Who has access: Anyone.'); }
   let j; try { j = await r.json(); } catch { throw new Error('הממסר לא החזיר תשובה תקינה. בודקים שהכתובת נכונה ושהפריסה היא Web app.'); }
   return j;
 }
@@ -190,8 +190,9 @@ async function morningCall(env, method, path, body, token) {
   } else {
     let r;
     try {
-      r = await fetch(url, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      r = await fetchT(url, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined }, 60000);
     } catch (e) {
+      if (e.timeout) throw new Error('Morning לא ענו תוך דקה. כדאי לבדוק באתר Morning אם המסמך בכל זאת הופק, לפני שמנסים שוב.');
       throw new Error('Morning חוסמים חיבור ישיר מהטלפון. כדי להשתמש ב-Morning בטלפון מגדירים ממסר: ☰ ← Morning ← „כתובת ממסר”. בינתיים אפשר להפיק מהמחשב.');
     }
     status = r.status; try { j = await r.json(); } catch { /* ignore */ }
@@ -1437,6 +1438,16 @@ function openSheet(html) {
   return sh;
 }
 function closeSheet() { const ta = $('#noteText'); if (ta) ta.dispatchEvent(new Event('change')); Voice.cancel(); $('#sheet').hidden = true; $('#sheetBack').hidden = true; $('#sheet').innerHTML = ''; }
+function progressSheet(t, msg = '') {
+  // חלון „עובד על זה…” – כדי שלא ייראה שלא קורה כלום בזמן שמחכים ל-Morning
+  openSheet(`<div style="text-align:center;padding:18px 6px"><div class="spinner" style="margin:6px auto"></div><h3 style="margin:12px 0 6px">${esc(t)}</h3><p class="note" style="white-space:pre-line">${esc(msg || 'זה יכול לקחת עד חצי דקה. לא סוגרים את האפליקציה.')}</p></div>`);
+}
+async function fetchT(url, opts = {}, ms = 45000) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ac.signal }); }
+  catch (e) { if (e.name === 'AbortError') { const x = new Error('timeout'); x.timeout = true; throw x; } throw e; }
+  finally { clearTimeout(t); }
+}
 function alertSheet(t, msg, then = null) {
   const sh = openSheet(`<h3 style="margin:4px 0 8px">${esc(t)}</h3><p style="white-space:pre-line">${esc(msg)}</p><div class="actions"><button class="btn primary" id="okBtn">אישור</button></div>`);
   $('#okBtn', sh).onclick = () => (then ? then() : closeSheet());
@@ -2436,7 +2447,7 @@ function showBulkReceipts(monthIdx = null) {
     const send = $('#brSend', sh).checked, total = jobs.reduce((t, j) => t + j.ss.reduce((a, e) => a + sessionAmount(e), 0), 0);
     if (!await choose('קבלות לסוף החודש', `להפיק ${jobs.length} חשבוניות מס/קבלה, סה״כ ${fmtMoney(total)}?` + (m.env === 'production' ? '\n\nאלה מסמכים רשמיים: אחרי ההפקה אי אפשר למחוק אותם, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }])) { showBulkReceipts(mi); return; }
     const date = $('#brDate', sh).value || isoDate(today()); let ok = 0; const errors = [], done = [];
-    busy(true);
+    busy(true); progressSheet(`מפיק ${jobs.length} קבלות ב-Morning…`);
     try {
       for (const j of jobs) {
         try {
@@ -2962,7 +2973,7 @@ async function voidReceipt(ev, back) {
   if (m.env === 'production' && !await choose('חשבונית זיכוי', `להפיק ב-Morning חשבונית זיכוי שמבטלת את קבלה ${no}?\n\nגם חשבונית הזיכוי היא מסמך רשמי.`, [{ label: 'כן, להפיק', value: true, cls: 'danger' }])) { back(); return; }
   const contact = clientInfo(name).morning_client || {};
   const payer = contact.name || group.map(e => props(e).pay_payer).find(Boolean) || name;
-  busy(true);
+  busy(true); progressSheet('מפיק חשבונית זיכוי ב-Morning…');
   try {
     const res = await morningCreate(m.env, morningCreditDocument(group, { name: payer, emails: (contact.emails && contact.emails.length) ? contact.emails : clientEmails(name), item: m.item, docNo: no, origId: p.rcpt_doc, date: isoDate(today()), vatIncluded: m.vat_included, clientId: contact.id || null }));
     busy(false); await finish(String(res.number || ''));
@@ -3061,15 +3072,15 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null,
     const real = m.env === 'production';
     const ok = await choose('הפקת קבלה', `להפיק חשבונית מס/קבלה על ${ss.length} טיפולים, סה״כ ${fmtMoney(total)}, על שם „${payer}”?` + (real ? '\n\nזה מסמך רשמי: אחרי ההפקה אי אפשר למחוק אותו, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }]);
     if (!ok) { showMorningIssue({ ev, client: name, extra, preIds, docDate, onlyIds, onBack }); return; }
-    busy(true);
+    busy(true); progressSheet('מפיק קבלה ב-Morning…');
     try {
       const contact = contacts[cid] || null;
       const body = morningDocument(ss, { name: payer, emails, send, item, remarks, date, vatIncluded: m.vat_included, clientId: contact ? contact.id : null });
       const res = await morningCreate(m.env, body);
       const url = res.url || {};
       const ch = { rcpt_issued: 'yes', rcpt_no: String(res.number || ''), rcpt_date: date, rcpt_doc: String(res.id || ''), rcpt_url: typeof url === 'object' ? (url.he || url.origin || '') : String(url), rcpt_src: 'morning', rcpt_count: ss.length > 1 ? String(ss.length) : '' };
-      for (const e of ss) setStatus(e, ch);
-      linkMorningContact(name, contact);
+      for (const e of ss) await setStatus(e, ch);
+      try { await linkMorningContact(name, contact); } catch { /* לא קריטי */ }
       const phone = clientPhone(name);
       if (m.send_whatsapp !== false && phone) {
         const text = receiptWaText(ss, name, ch.rcpt_no, ch.rcpt_url, item), wa = whatsappUrl(phone, text);
@@ -3082,7 +3093,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null,
         $('#rcCopy', sh2).onclick = async () => { try { await navigator.clipboard.writeText(text); $('#rcCopy', sh2).textContent = '✓ הועתק'; } catch { toast('לא הצלחתי להעתיק'); } };
         $('#rcClose', sh2).onclick = () => (onBack ? onBack() : closeSheet());
       } else alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.` + (phone || m.send_whatsapp === false ? '' : '\n\nכדי שהקבלה תישלח גם בוואטסאפ, מוסיפים טלפון הורה (☰ ← מטופלים).'), onBack);
-    } catch (e) { alertSheet('ההפקה נכשלה', e.message); }
+    } catch (e) { alertSheet('ההפקה נכשלה', (e && e.message) || String(e), () => showMorningIssue({ ev, client: name, extra, preIds, docDate, onlyIds, onBack })); }
     finally { busy(false); }
   };
 }
