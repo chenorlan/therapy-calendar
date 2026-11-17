@@ -1434,7 +1434,7 @@ function step(dir) {
 // ------------------------------------------------------------------ חלונות (Bottom sheets)
 function openSheet(html) {
   const sh = $('#sheet');
-  sh.innerHTML = '<div class="grip"></div>' + html;
+  sh.removeAttribute('data-dup-ok'); sh.innerHTML = '<div class="grip"></div>' + html;
   sh.hidden = false; $('#sheetBack').hidden = false; sh.scrollTop = 0;
   return sh;
 }
@@ -2445,9 +2445,9 @@ function showBulkReceipts(monthIdx = null) {
     const jobs = rows.map((r, i) => ({ ...r, payer: sh.querySelector(`[data-bp="${i}"]`).value.trim() || r.name, on: sh.querySelector(`[data-br="${i}"]`).checked })).filter(r => r.on);
     if (!jobs.length) return;
     const bad = jobs.find(j => j.missing); if (bad) { toast(`ל${bad.name} יש טיפול בלי סכום`); return; }
-    const send = $('#brSend', sh).checked, total = jobs.reduce((t, j) => t + j.ss.reduce((a, e) => a + sessionAmount(e), 0), 0);
+    const send = $('#brSend', sh).checked, date = $('#brDate', sh).value || isoDate(today()), total = jobs.reduce((t, j) => t + j.ss.reduce((a, e) => a + sessionAmount(e), 0), 0);
     if (!await choose('קבלות לסוף החודש', `להפיק ${jobs.length} חשבוניות מס/קבלה, סה״כ ${fmtMoney(total)}?` + (m.env === 'production' ? '\n\nאלה מסמכים רשמיים: אחרי ההפקה אי אפשר למחוק אותם, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }])) { showBulkReceipts(mi); return; }
-    const date = $('#brDate', sh).value || isoDate(today()); let ok = 0; const errors = [], done = [];
+    let ok = 0; const errors = [], done = [];
     busy(true); progressSheet(`מפיק ${jobs.length} קבלות ב-Morning…`);
     try {
       for (const j of jobs) {
@@ -3599,13 +3599,14 @@ function showForm({ start = null, ev = null, mode = 'new', master = null, purpos
   $('#fSave', sh).onclick = async () => {
     const name = $('#fName', sh).value.trim(), phone = isEv ? '' : $('#fPhone', sh).value.trim();
     if (!name) { $('#fErr', sh).textContent = isEv ? 'יש למלא כותרת.' : 'יש למלא את שם המטופל/ת.'; return; }
-    if (isClient && !editing && names.includes(name)) {
-      const go = await choose('מטופל/ת חדש/ה', `כבר יש ביומן מטופל/ת בשם „${name}”. להוסיף בכל זאת?`, [{ label: 'כן, להוסיף', value: true, cls: 'primary' }]);
-      if (!go) return;
-    }
     const st = fromInputs($('#fDate', sh).value, fs.value), en = fromInputs($('#fDate', sh).value, fe.value);
     if (!(en > st)) { $('#fErr', sh).textContent = 'שעת הסיום צריכה להיות אחרי שעת ההתחלה.'; return; }
     if (fp.value.trim() && !toAmount(fp.value)) { $('#fErr', sh).textContent = 'המחיר צריך להיות מספר, למשל 250.'; return; }
+    if (isClient && !editing && names.includes(name) && sh.dataset.dupOk !== name) {
+      // אישור בתוך הטופס (חלון נפרד היה מוחק את הטופס לפני שהשדות נקראו)
+      sh.dataset.dupOk = name;
+      $('#fErr', sh).textContent = `כבר יש ביומן מטופל/ת בשם „${name}”. כדי להוסיף בכל זאת לוחצים שוב על שמירה.`; return;
+    }
     const price = toAmount(fp.value);
     let emails = [], invite = false;
     if (!editing && !isEv) {
