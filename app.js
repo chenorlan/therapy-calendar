@@ -154,7 +154,8 @@ const MORNING_URLS = { production: 'https://api.greeninvoice.co.il/api/v1', sand
 const MORNING_AUTH = { production: 'https://api.morning.co/idp/v1/oauth/token', sandbox: 'https://api.sandbox.morning.dev/idp/v1/oauth/token' };
 const MORNING_UPLOAD_URL = 'https://apigw.greeninvoice.co.il/file-upload/v1/url';
 const MORNING_PAY = { cash: 1, bank: 4, bit: 10, paybox: 10, other: 11 };
-const morningCfg = () => { const m = { ...DEFAULT_MORNING, ...(S.settings.morning || {}) }; if (m.item === OLD_MORNING_ITEM) m.item = DEFAULT_MORNING.item; return m; };
+const morningCfg = () => { const m = { ...DEFAULT_MORNING, ...(S.settings.morning || {}) };
+  for (const k of ['item', 'template', 'env']) if (typeof m[k] !== 'string') m[k] = DEFAULT_MORNING[k] || ''; if (m.item === OLD_MORNING_ITEM) m.item = DEFAULT_MORNING.item; return m; };
 function monthsText(ss) {
   // החודשים של הטיפולים, למשל „נובמבר 2026” או „אוקטובר ונובמבר 2026” – זהה ל-Windows
   const ms = [...new Set(ss.map(e => { const s = evTimes(e).s; return s.getFullYear() * 100 + s.getMonth(); }))].sort();
@@ -318,7 +319,7 @@ async function morningCreate(env, body) {
 }
 const sessionAmount = ev => payAmount(ev) || evPrice(ev);
 const receiptDatesText = ss => ss.map(e => evTimes(e).s).sort((a, b) => a - b).map(dmy).join(', ');
-const renderReceiptText = (tpl, ss, name) => tpl.replace('{תאריכים}', receiptDatesText(ss)).replace('{מספר_טיפולים}', String(ss.length))
+const renderReceiptText = (tpl, ss, name) => String(tpl || '').replace('{תאריכים}', receiptDatesText(ss)).replace('{מספר_טיפולים}', String(ss.length))
   .replace('{שם_מטופל}', name).replace('{סכום}', fmtMoney(ss.reduce((a, e) => a + (sessionAmount(e) || 0), 0)));
 function morningDocument(ss, { name, emails, send, item, remarks, date, vatIncluded, clientId = null }) {
   item = renderItem(item, ss);
@@ -2964,7 +2965,7 @@ async function voidReceipt(ev, back) {
     for (const e of group) await setStatus(e, { ...Object.fromEntries(RCPT_KEYS.map(k => [k, ''])), rcpt_void: note.slice(0, 900) });
     toast('✓ ' + note);
     if (feat('morning') && await choose('קבלה מתוקנת', 'להפיק עכשיו קבלה מתוקנת על אותם טיפולים?', [{ label: 'כן, להפיק', value: true, cls: 'primary' }]))
-      showMorningIssue({ ev: group[0], extra: group, preIds: group.map(e => e.id), onBack: back });
+      safeIssue({ ev: group[0], extra: group, preIds: group.map(e => e.id), onBack: back });
     else back();
   };
   if (choice === 'mark') { await finish(); return; }
@@ -2978,6 +2979,10 @@ async function voidReceipt(ev, back) {
     const res = await morningCreate(m.env, morningCreditDocument(group, { name: payer, emails: (contact.emails && contact.emails.length) ? contact.emails : clientEmails(name), item: m.item, docNo: no, origId: p.rcpt_doc, date: isoDate(today()), vatIncluded: m.vat_included, clientId: contact.id || null }));
     busy(false); await finish(String(res.number || ''));
   } catch (e) { busy(false); alertSheet('ההפקה של חשבונית הזיכוי נכשלה', e.message + '\n\nאפשר לבטל את הקבלה ישירות באתר Morning, ואז לבחור כאן „כבר בוטלה ב-Morning”.', back); }
+}
+function safeIssue(opts) {
+  try { showMorningIssue(opts); }
+  catch (e) { alertSheet('לא הצלחתי לפתוח את הפקת הקבלה', ((e && e.message) || String(e)) + `\n\nגרסה ${APP_VERSION}`, opts.onBack || null); }
 }
 function showMorningIssue({ ev = null, client = null, extra = [], preIds = null, docDate = null, onlyIds = null, onBack = null } = {}) {
   // הפקת חשבונית מס/קבלה אחת ב-Morning – לטיפול אחד או לכמה טיפולים יחד
@@ -3026,7 +3031,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null,
   };
   const contactChosen = () => {
     const c = contacts[$('#miContact', sh).value]; if (!c) return;
-    $('#miName', sh).value = c.name; if (c.emails.length) $('#miEmails', sh).value = c.emails.join(', ');
+    if (c.name) $('#miName', sh).value = c.name; if (c.emails.length) $('#miEmails', sh).value = c.emails.join(', ');
     $('#miCInfo', sh).textContent = 'הקבלה תירשם על איש הקשר הזה ב-Morning (לא ייווצר איש קשר חדש).' + (c.emails.length ? ' המייל שלו נלקח מ-Morning.' : '');
   };
   const search = async (text, auto = false, payer = '') => {
@@ -3052,7 +3057,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null,
     $('#miEmails', sh).value = clientEmails(name).join(', ');
     setContacts([], null); $('#miCInfo', sh).textContent = '';
     const linked = clientInfo(name).morning_client;
-    if (linked && linked.id) { setContacts([{ ...linked, emails: linked.emails || [] }], linked.id); $('#miCInfo', sh).textContent = '✓ מקושר לאיש הקשר הזה מקבלה קודמת.'; }
+    if (linked && linked.id) { setContacts([{ ...linked, name: linked.name || name, emails: linked.emails || [] }], linked.id); $('#miCInfo', sh).textContent = '✓ מקושר לאיש הקשר הזה מקבלה קודמת.'; }
     else search(name, true, payer);
     upd();
   };
@@ -3447,7 +3452,7 @@ function showReceiptMatch(blob, url, info, matches, onSaved = null) {
       changed();
       if (feat('morning') && morningReady() && !chosen.some(receiptIssued)) {
         const yes = await choose('קבלה ב-Morning', 'להפיק עכשיו חשבונית מס/קבלה ב-Morning על התשלום הזה?', [{ label: 'כן, להפיק', value: true, cls: 'primary' }]);
-        if (yes) showMorningIssue({ ev: chosen[0], extra: chosen, preIds: chosen.map(e => e.id) });
+        if (yes) safeIssue({ ev: chosen[0], extra: chosen, preIds: chosen.map(e => e.id) });
       }
     } catch (e) { btn.disabled = false; btn.textContent = 'שמירה'; handleErr(e); }
   };
@@ -3926,6 +3931,15 @@ const Mock = {
 };
 
 // ------------------------------------------------------------------ התחלה
+// שגיאה שלא נתפסה – מציגים אותה, כדי שלא ייראה ש„לא קורה כלום”
+function showUncaught(e) {
+  const msg = (e && (e.message || e.reason && e.reason.message)) || String(e && e.reason || e || '');
+  if (!msg || /ResizeObserver|Script error/i.test(msg)) return;
+  busy(false); loadingCount = 0; $('#loadbar').hidden = true;
+  alertSheet('משהו השתבש', `הפעולה לא הושלמה.\n\nפירוט (לשלוח ל-Claude אם זה חוזר):\n${msg}\n\nגרסה ${APP_VERSION}`);
+}
+window.addEventListener('unhandledrejection', e => showUncaught(e.reason || e));
+window.addEventListener('error', e => showUncaught(e.error || e));
 function init() {
   restoreToken();
   $('#menuBtn').onclick = showMenu;
