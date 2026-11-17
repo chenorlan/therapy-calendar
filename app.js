@@ -1,4 +1,4 @@
-const APP_VERSION = '41';
+const APP_VERSION = '43';
 /* יומן הטיפולים – גרסת אנדרואיד (אפליקציית רשת).
    כל הנתונים נשמרים ב-Google Calendar, באותם שדות שאפליקציית Windows משתמשת בהם,
    ולכן שתי האפליקציות מסונכרנות. */
@@ -1437,9 +1437,9 @@ function openSheet(html) {
   return sh;
 }
 function closeSheet() { const ta = $('#noteText'); if (ta) ta.dispatchEvent(new Event('change')); Voice.cancel(); $('#sheet').hidden = true; $('#sheetBack').hidden = true; $('#sheet').innerHTML = ''; }
-function alertSheet(t, msg) {
+function alertSheet(t, msg, then = null) {
   const sh = openSheet(`<h3 style="margin:4px 0 8px">${esc(t)}</h3><p style="white-space:pre-line">${esc(msg)}</p><div class="actions"><button class="btn primary" id="okBtn">אישור</button></div>`);
-  $('#okBtn', sh).onclick = closeSheet;
+  $('#okBtn', sh).onclick = () => (then ? then() : closeSheet());
 }
 function choose(t, msg, options) {
   return new Promise(resolve => {
@@ -1699,6 +1699,7 @@ function renderQuickBar() {
     ['waitlist', 1, `<button class="qchip" id="qbWait">⏳ המתנה${w ? ` (${w})` : ''}</button>`, showWaitlist],
     ['slots', 1, '<button class="qchip" id="qbSlot">🔎 שעה פנויה</button>', () => showSlotFinder({ onPick: sl => showNewMenu(sl[0]) })],
     ['cancelday', 1, '<button class="qchip" id="qbCday">🤒 יום ביטול</button>', () => showCancelDay()],
+    ['morning', 1, '<button class="qchip" id="qbRcpt">🧾 קבלה</button>', () => showMorningIssue()],
     ['bulkreceipts', feat('morning') ? 1 : 0, '<button class="qchip" id="qbBulk">🧾 קבלות לחודש</button>', () => showBulkReceipts()],
   ].filter(c => feat(c[0]) && c[1]);
   bar.innerHTML = chips.map(c => c[2]).join('');
@@ -2016,7 +2017,7 @@ function showClientFile(name) {
       ${feat('exercises') && p.homework ? `<div class="note">📚 ${esc(p.homework)}</div>` : ''}</div>`; };
   const sh = openSheet(`<h3 style="margin:4px 0 6px">📁 ${esc(name)}</h3>
     <p style="line-height:1.6">${facts.join('<br>')}</p>
-    <div class="seg"><button class="btn" id="cfPhone">📞 טלפון הורה</button>${feat('summary') ? '<button class="btn" id="cfSum">📄 סיכום טיפול (AI)</button>' : ''}${feat('docs') ? '<button class="btn" id="cfDocs">📎 מסמכים</button>' : ''}
+    <div class="seg"><button class="btn" id="cfPhone">📞 טלפון הורה</button>${feat('morning') ? '<button class="btn" id="cfRcpt">🧾 קבלה ב-Morning</button>' : ''}${feat('summary') ? '<button class="btn" id="cfSum">📄 סיכום טיפול (AI)</button>' : ''}${feat('docs') ? '<button class="btn" id="cfDocs">📎 מסמכים</button>' : ''}
       ${feat('debts') && debt ? '<button class="btn" id="cfRem">📨 תזכורת תשלום</button>' : ''}${feat('makeups') && due.length ? '<button class="btn" id="cfMk">↺ קביעת השלמה</button>' : ''}${feat('export') ? '<button class="btn" id="cfPdf">🖨 ייצוא ל-PDF</button>' : ''}</div>
     ${(() => { const up = ss.filter(e => evTimes(e).s > now && attended(e) !== 'no').slice(0, 3);
       return up.length ? `<div class="sec">הטיפולים הקרובים</div>${up.map(row).join('')}` : ''; })()}
@@ -2025,6 +2026,7 @@ function showClientFile(name) {
   sh.querySelectorAll('[data-open]').forEach(c => c.onclick = () => { const e = allKnown().find(x => x.id === c.dataset.open); if (e) showDetails(e); });
   const on = (id, fn) => { const b = $(id, sh); if (b) b.onclick = fn; };
   on('#cfSum', () => showSummary(name));
+  on('#cfRcpt', () => showMorningIssue({ client: name, onBack: () => showClientFile(name) }));
   on('#cfPhone', async () => { const t = prompt(`טלפון ההורה של ${name} (לקבלות ולתזכורות בוואטסאפ):`, clientPhone(name)); if (t !== null) { await saveClientPhone(name, t); showClientFile(name); } }); on('#cfDocs', () => showClientDocs(name));
   on('#cfRem', () => showPayReminder(debt, true)); on('#cfPdf', () => exportClient(name)); on('#cfMk', () => scheduleMakeup(due[0]));
   $('#cfClose', sh).onclick = closeSheet;
@@ -2413,13 +2415,19 @@ function showBulkReceipts(monthIdx = null) {
   const sh = openSheet(`<h3 style="margin:4px 0 6px">🧾 קבלות לסוף החודש</h3>
     <div class="field"><label>חודש הטיפולים</label><select id="brMonth">${months.map((x, i) => `<option value="${i}" ${i === mi ? 'selected' : ''}>${MONTHS[x.getMonth()]} ${x.getFullYear()}</option>`).join('')}</select></div>
     ${m.env === 'sandbox' ? '<p class="note" style="background:#FFF1D6;color:#7A4B00;padding:6px 8px;border-radius:8px">סביבת בדיקות: המסמכים לא יהיו אמיתיים.</p>' : ''}
+    <div class="field"><label>תאריך הקבלות</label><div class="two"><input type="date" id="brDate" value="${showBulkReceipts.date || isoDate(today())}" style="flex:2"><button class="btn" id="brEnd" style="flex:1">סוף החודש</button></div></div>
     ${rows.length ? `<p class="note">קבלה אחת לכל מטופל/ת על כל הטיפולים שלו/ה בחודש:</p>` + rows.map((r, i) => `<div class="card" style="margin:6px 0;padding:8px 10px">
       <label class="check" style="margin:0"><input type="checkbox" data-br="${i}" ${r.missing ? '' : 'checked'}><b>${esc(r.name)}</b> · ${r.ss.length} טיפולים · ${fmtMoney(r.ss.reduce((t, e) => t + (sessionAmount(e) || 0), 0))}${r.missing ? ' <span class="err">⚠ חסר סכום</span>' : ''}</label>
-      <input type="text" data-bp="${i}" value="${esc(r.payer)}" placeholder="שם על הקבלה" style="margin-top:6px;width:100%;box-sizing:border-box"></div>`).join('')
+      <input type="text" data-bp="${i}" value="${esc(r.payer)}" placeholder="שם על הקבלה" style="margin-top:6px;width:100%;box-sizing:border-box">
+      <button class="btn" data-bd="${i}" style="margin-top:6px">פירוט ועריכה…</button></div>`).join('')
       : '<p>אין בחודש הזה טיפולים ששולמו בלי קבלה. ✓</p>'}
     <label class="check"><input type="checkbox" id="brSend" ${m.send_email ? 'checked' : ''}>לשלוח כל קבלה במייל של המטופל/ת או ההורה (למי שיש מייל)</label>
     <div class="actions"><button class="btn primary" id="brGo" ${rows.length ? '' : 'disabled'}>🧾 הפקת הקבלות</button><button class="btn" id="brClose">סגירה</button></div>`);
   $('#brMonth', sh).onchange = e => showBulkReceipts(+e.target.value);
+  $('#brDate', sh).onchange = e => { showBulkReceipts.date = e.target.value; };
+  $('#brEnd', sh).onclick = () => { const end = addDays(new Date(month.getFullYear(), month.getMonth() + 1, 1), -1); $('#brDate', sh).value = isoDate(end < today() ? end : today()); showBulkReceipts.date = $('#brDate', sh).value; };
+  sh.querySelectorAll('[data-bd]').forEach(b => b.onclick = () => { const r = rows[+b.dataset.bd], ids = r.ss.map(e => e.id);
+    showMorningIssue({ client: r.name, preIds: ids, onlyIds: ids, docDate: $('#brDate', sh).value, onBack: () => showBulkReceipts(mi) }); });
   $('#brClose', sh).onclick = closeSheet;
   $('#brGo', sh).onclick = async () => {
     const jobs = rows.map((r, i) => ({ ...r, payer: sh.querySelector(`[data-bp="${i}"]`).value.trim() || r.name, on: sh.querySelector(`[data-br="${i}"]`).checked })).filter(r => r.on);
@@ -2427,7 +2435,7 @@ function showBulkReceipts(monthIdx = null) {
     const bad = jobs.find(j => j.missing); if (bad) { toast(`ל${bad.name} יש טיפול בלי סכום`); return; }
     const send = $('#brSend', sh).checked, total = jobs.reduce((t, j) => t + j.ss.reduce((a, e) => a + sessionAmount(e), 0), 0);
     if (!await choose('קבלות לסוף החודש', `להפיק ${jobs.length} חשבוניות מס/קבלה, סה״כ ${fmtMoney(total)}?` + (m.env === 'production' ? '\n\nאלה מסמכים רשמיים: אחרי ההפקה אי אפשר למחוק אותם, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }])) { showBulkReceipts(mi); return; }
-    const date = isoDate(today()); let ok = 0; const errors = [], done = [];
+    const date = $('#brDate', sh).value || isoDate(today()); let ok = 0; const errors = [], done = [];
     busy(true);
     try {
       for (const j of jobs) {
@@ -2715,6 +2723,8 @@ function showDetails(ev) {
         <button class="btn ${receiptIssued(ev) && props(ev).rcpt_src !== 'morning' ? 'on' : ''}" id="rcYes" ${dis}>שיוך ידני…</button></div>
       ${receiptIssued(ev) ? `<p class="note" style="margin-top:-4px">${esc(receiptDetails(ev))}</p>` : ''}
       ${receiptIssued(ev) && (props(ev).rcpt_url || props(ev).rcpt_file) ? '<button class="btn" id="rcView" style="width:100%;margin-bottom:8px">📄 צפייה בקבלה</button>' : ''}
+      ${receiptIssued(ev) && edit ? '<button class="btn danger" id="rcVoid" style="width:100%;margin-bottom:8px">✖ ביטול הקבלה (הופקה בטעות)</button>' : ''}
+      ${!receiptIssued(ev) && props(ev).rcpt_void ? `<p class="note" style="margin-top:-4px">קבלה קודמת בוטלה: ${esc(props(ev).rcpt_void)}</p>` : ''}
       ${feat('notes') ? noteBoxHtml(ev) : ''}
       <p class="note">הסימונים נשמרים רק לפגישה הזו, לא לכל הסדרה.</p>`;
   }
@@ -2753,6 +2763,7 @@ function showDetails(ev) {
   const ry = $('#rcYes', sh); if (ry) ry.onclick = () => showReceiptIssued(ev);
   const rm = $('#rcMorning', sh); if (rm) rm.onclick = () => showMorningIssue({ ev });
   const rv = $('#rcView', sh); if (rv) rv.onclick = () => viewReceiptDoc(ev);
+  const rvd = $('#rcVoid', sh); if (rvd) rvd.onclick = () => voidReceipt(ev, () => showDetails(ev));
   const ub = $('#unpaidBtn', sh); if (ub) ub.onclick = () => {
     const old = props(ev).pay_receipt || null;
     setStatus(ev, Object.fromEntries(PAY_KEYS.map(k => [k, ''])), { detach: old }); showDetails(ev);
@@ -2915,11 +2926,60 @@ function showMorningSettings(then) {
     closeSheet(); if (then) then();
   };
 }
-function showMorningIssue({ ev = null, client = null, extra = [], preIds = null } = {}) {
+// ---- ביטול קבלה שהופקה בטעות: חשבונית זיכוי ב-Morning, או רק עדכון שהיא בוטלה (זהה ל-Windows)
+function receiptGroup(ev) {
+  const p = props(ev), [k, v] = p.rcpt_doc ? ['rcpt_doc', p.rcpt_doc] : ['rcpt_no', p.rcpt_no];
+  if (!v) return [ev];
+  const seen = new Set(), out = [];
+  for (const e of [ev, ...allKnown()]) { if (seen.has(e.id) || props(e)[k] !== v || props(e).rcpt_issued !== 'yes') continue; seen.add(e.id); out.push(e); }
+  return out;
+}
+function morningCreditDocument(ss, { name, emails, item, docNo, origId, date, vatIncluded, clientId = null }) {
+  const body = morningDocument(ss, { name, emails, send: false, item, remarks: `ביטול חשבונית מס/קבלה מס׳ ${docNo} – הופקה בטעות.`, date, vatIncluded, clientId });
+  body.type = 330; body.description = `ביטול חשבונית מס/קבלה מס׳ ${docNo}`;
+  delete body.payment; body.linkedDocumentIds = [origId]; body.linkType = 'cancel';
+  return body;
+}
+async function voidReceipt(ev, back) {
+  const p = props(ev), group = receiptGroup(ev), name = title(ev).trim(), no = p.rcpt_no || '';
+  const dates = group.map(e => evTimes(e).s).sort((a, b) => a - b).map(d => dmy(d).slice(0, 5)).join(', ');
+  const canCredit = p.rcpt_src === 'morning' && !!p.rcpt_doc && feat('morning');
+  const opts = (canCredit ? [{ label: 'ביטול ב-Morning (חשבונית זיכוי)', value: 'credit', cls: 'danger' }] : [])
+    .concat([{ label: p.rcpt_src === 'morning' ? 'כבר בוטלה ב-Morning – רק לעדכן כאן' : 'לבטל את שיוך הקבלה', value: 'mark' }]);
+  const choice = await choose('ביטול קבלה', `ביטול קבלה ${no ? 'מס׳ ' + no : ''} של ${name} (${group.length} טיפולים: ${dates}).\n\nמסמך חשבונאי לא נמחק: ב-Morning מבטלים אותו בחשבונית זיכוי. התשלום נשאר מסומן, והטיפולים יחזרו לרשימת „שולם, בלי קבלה”, כדי שאפשר יהיה להפיק קבלה מתוקנת.`, opts);
+  if (!choice) { back(); return; }
+  const finish = async (creditNo = '') => {
+    const note = `${no ? 'מס׳ ' + no : 'קבלה'}${creditNo ? ' בוטלה בחשבונית זיכוי ' + creditNo : ' בוטלה'} (${dmy(today())})`;
+    for (const e of group) await setStatus(e, { ...Object.fromEntries(RCPT_KEYS.map(k => [k, ''])), rcpt_void: note.slice(0, 900) });
+    toast('✓ ' + note);
+    if (feat('morning') && await choose('קבלה מתוקנת', 'להפיק עכשיו קבלה מתוקנת על אותם טיפולים?', [{ label: 'כן, להפיק', value: true, cls: 'primary' }]))
+      showMorningIssue({ ev: group[0], extra: group, preIds: group.map(e => e.id), onBack: back });
+    else back();
+  };
+  if (choice === 'mark') { await finish(); return; }
+  if (!morningReady()) { showMorningSettings(back); return; }
+  const m = morningCfg();
+  if (m.env === 'production' && !await choose('חשבונית זיכוי', `להפיק ב-Morning חשבונית זיכוי שמבטלת את קבלה ${no}?\n\nגם חשבונית הזיכוי היא מסמך רשמי.`, [{ label: 'כן, להפיק', value: true, cls: 'danger' }])) { back(); return; }
+  const contact = clientInfo(name).morning_client || {};
+  const payer = contact.name || group.map(e => props(e).pay_payer).find(Boolean) || name;
+  busy(true);
+  try {
+    const res = await morningCreate(m.env, morningCreditDocument(group, { name: payer, emails: (contact.emails && contact.emails.length) ? contact.emails : clientEmails(name), item: m.item, docNo: no, origId: p.rcpt_doc, date: isoDate(today()), vatIncluded: m.vat_included, clientId: contact.id || null }));
+    busy(false); await finish(String(res.number || ''));
+  } catch (e) { busy(false); alertSheet('ההפקה של חשבונית הזיכוי נכשלה', e.message + '\n\nאפשר לבטל את הקבלה ישירות באתר Morning, ואז לבחור כאן „כבר בוטלה ב-Morning”.', back); }
+}
+function showMorningIssue({ ev = null, client = null, extra = [], preIds = null, docDate = null, onlyIds = null, onBack = null } = {}) {
   // הפקת חשבונית מס/קבלה אחת ב-Morning – לטיפול אחד או לכמה טיפולים יחד
-  if (!morningReady()) { showMorningSettings(() => showMorningIssue({ ev, client, extra, preIds })); return; }
-  const groups = paidWithoutReceipt(extra), names = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'he'));
+  const again = () => showMorningIssue({ ev, client, extra, preIds, docDate, onlyIds, onBack });
+  if (!morningReady()) { showMorningSettings(again); return; }
+  let groups = paidWithoutReceipt(extra);
+  if (onlyIds) {  // מ„קבלות לסוף החודש”: רק הטיפולים של החודש שנבחר
+    const ids = new Set(onlyIds);
+    groups = Object.fromEntries(Object.entries(groups).map(([n, g]) => [n, g.filter(e => ids.has(e.id))]).filter(([, g]) => g.length));
+  }
+  const names = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'he'));
   if (!names.length) { alertSheet('קבלות ב-Morning', 'אין טיפולים ששולמו וטרם הוצאה להם קבלה.'); return; }
+  if (client && !groups[client] && !ev) { alertSheet('קבלות ב-Morning', `ל${client} אין טיפולים ששולמו וטרם הוצאה להם קבלה.`); return; }
   let name = ev ? title(ev).trim() : (client && groups[client] ? client : names[0]);
   if (!groups[name]) { alertSheet('קבלות ב-Morning', 'אין לפגישה הזו תשלום בלי קבלה.'); return; }
   const m = morningCfg();
@@ -2933,7 +2993,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
     <div class="field"><label class="check"><input type="checkbox" id="miSend" ${m.send_email ? 'checked' : ''}>לשלוח את הקבלה במייל ל:</label><input type="email" dir="ltr" id="miEmails"></div>
     <div class="field"><label>תיאור השירות</label><input type="text" id="miItem" value="${esc(m.item)}"></div>
     <div class="field"><label>טקסט קבוע</label><textarea id="miRemarks" rows="3"></textarea></div>
-    <div class="field"><label>תאריך המסמך</label><input type="date" id="miDate" value="${isoDate(today())}"></div>
+    <div class="field"><label>תאריך המסמך</label><input type="date" id="miDate" value="${docDate || isoDate(today())}"></div>
     <p class="totals" id="miSum" style="padding:0"></p><p class="err" id="miErr"></p>
     <div class="actions"><button class="btn primary" id="miGo">הפקה ב-Morning</button><button class="btn" id="miCancel">ביטול</button></div>`);
   let touched = false, itemTouched = false;
@@ -2987,7 +3047,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
   };
   $('#miClient', sh).onchange = e => { name = e.target.value; touched = false; fill(); };
   fill();
-  $('#miCancel', sh).onclick = () => { if (ev) showDetails(ev); else closeSheet(); };
+  $('#miCancel', sh).onclick = () => { if (onBack) onBack(); else if (ev) showDetails(ev); else closeSheet(); };
   $('#miGo', sh).onclick = async () => {
     const ss = chosen(), err = t => { $('#miErr', sh).textContent = t; };
     if (!ss.length) return err('יש לבחור לפחות טיפול אחד.');
@@ -3000,7 +3060,7 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
     const remarks = $('#miRemarks', sh).value.trim(), item = $('#miItem', sh).value.trim() || m.item, send = $('#miSend', sh).checked, cid = $('#miContact', sh).value;
     const real = m.env === 'production';
     const ok = await choose('הפקת קבלה', `להפיק חשבונית מס/קבלה על ${ss.length} טיפולים, סה״כ ${fmtMoney(total)}, על שם „${payer}”?` + (real ? '\n\nזה מסמך רשמי: אחרי ההפקה אי אפשר למחוק אותו, רק לבטל במסמך זיכוי.' : '\n\n(סביבת בדיקות)'), [{ label: 'כן, להפיק', value: true, cls: 'primary' }]);
-    if (!ok) { showMorningIssue({ ev, client: name, extra }); return; }
+    if (!ok) { showMorningIssue({ ev, client: name, extra, preIds, docDate, onlyIds, onBack }); return; }
     busy(true);
     try {
       const contact = contacts[cid] || null;
@@ -3020,8 +3080,8 @@ function showMorningIssue({ ev = null, client = null, extra = [], preIds = null 
           <div class="actions"><button class="btn" id="rcClose">סגירה</button></div>`);
         $('#rcWa', sh2).onclick = () => setTimeout(closeSheet, 300);
         $('#rcCopy', sh2).onclick = async () => { try { await navigator.clipboard.writeText(text); $('#rcCopy', sh2).textContent = '✓ הועתק'; } catch { toast('לא הצלחתי להעתיק'); } };
-        $('#rcClose', sh2).onclick = closeSheet;
-      } else alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.` + (phone || m.send_whatsapp === false ? '' : '\n\nכדי שהקבלה תישלח גם בוואטסאפ, מוסיפים טלפון הורה (☰ ← מטופלים).'));
+        $('#rcClose', sh2).onclick = () => (onBack ? onBack() : closeSheet());
+      } else alertSheet('Morning', `✓ הופקה חשבונית מס/קבלה ${ch.rcpt_no} על ${ss.length} טיפולים.` + (phone || m.send_whatsapp === false ? '' : '\n\nכדי שהקבלה תישלח גם בוואטסאפ, מוסיפים טלפון הורה (☰ ← מטופלים).'), onBack);
     } catch (e) { alertSheet('ההפקה נכשלה', e.message); }
     finally { busy(false); }
   };
